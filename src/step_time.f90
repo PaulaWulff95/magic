@@ -11,8 +11,7 @@ module step_time_mod
    use parallel_mod
    use precision_mod
    use constants, only: zero, one, half
-   use truncation, only: n_r_max, l_max, l_maxMag, lm_max, lmP_max, fd_order, &
-       &                 fd_order_bound
+   use truncation, only: n_r_max, l_max, l_maxMag, lm_max, fd_order, fd_order_bound
    use num_param, only: n_time_steps, run_time_limit, tEnd, dtMax, &
        &                dtMin, tScale, dct_counter, nl_counter,    &
        &                solve_counter, lm2phy_counter, td_counter, &
@@ -27,11 +26,12 @@ module step_time_mod
        &            l_b_nl_cmb, l_FluxProfs, l_ViscBcCalc, l_perpPar,  &
        &            l_HT, l_dtBmovie, l_heat, l_conv, l_movie,         &
        &            l_runTimeLimit, l_save_out, l_bridge_step,         &
-       &            l_dt_cmb_field, l_chemical_conv, l_mag_kin,        &
+       &            l_dt_cmb_field, l_chemical_conv, l_mag_kin, l_hemi,&
        &            l_power, l_double_curl, l_PressGraph, l_probe,     &
        &            l_AB1, l_finite_diff, l_cond_ic, l_single_matrix,  &
        &            l_packed_transp, l_rot_ic, l_rot_ma, l_cond_ma,    &
-       &            l_parallel_solve, l_mag_par_solve, l_phase_field
+       &            l_parallel_solve, l_mag_par_solve, l_phase_field,  &
+       &            l_onset, l_geosMovie
    use init_fields, only: omega_ic1, omega_ma1
    use radialLoop, only: radialLoopG
    use LMLoop_mod, only: LMLoop, finish_explicit_assembly, assemble_stage, &
@@ -115,6 +115,7 @@ contains
       logical :: l_cmb            ! Store set of b at CMB
       logical :: l_r              ! Store coeff at various depths
       logical :: lHelCalc         ! Calculate helicity for output
+      logical :: lHemiCalc        ! Calculate hemisphericity for output
       logical :: lPowerCalc       ! Calculate viscous heating in the physical space
       logical :: lviscBcCalc      ! Calculate horizontal velocity and (grad T)**2
       logical :: lFluxProfCalc    ! Calculate radial flux components
@@ -123,9 +124,9 @@ contains
       logical :: lTOCalc          ! Calculate TO stuff
       logical :: lTONext,lTONext2 ! TO stuff for next steps
       logical :: lTOframeNext,lTOframeNext2
-      logical :: l_logNext, l_pot
+      logical :: l_logNext, l_pot, lOnsetCalc
       logical :: lRmsCalc,lRmsNext, l_pure, l_mat_time
-      logical :: lPressCalc,lPressNext
+      logical :: lPressCalc,lPressNext,lP00Next,lP00Transp
       logical :: lMat, lMatNext   ! update matrices
       logical :: l_probe_out      ! Sensor output
 
@@ -156,24 +157,11 @@ contains
       !--- Lorentz torques:
       real(cp) :: lorentz_torque_ma,lorentz_torque_ic
 
-      !-- Arrays for outMisc.f90 and outPar.f90
-      real(cp) :: HelASr_Rloc(2,nRstart:nRstop),Hel2ASr_Rloc(2,nRstart:nRstop)
-      real(cp) :: HelnaASr_Rloc(2,nRstart:nRstop),Helna2ASr_Rloc(2,nRstart:nRstop)
-      real(cp) :: HelEAASr_Rloc(nRstart:nRstop),viscASr_Rloc(nRstart:nRstop)
-      real(cp) :: uhASr_Rloc(nRstart:nRstop),duhASr_Rloc(nRstart:nRstop)
-      real(cp) :: gradsASr_Rloc(nRstart:nRstop),fconvASr_Rloc(nRstart:nRstop)
-      real(cp) :: fkinASr_Rloc(nRstart:nRstop),fviscASr_Rloc(nRstart:nRstop)
-      real(cp) :: fpoynASr_Rloc(nRstartMag:nRstopMag),fresASr_Rloc(nRstartMag:nRstopMag)
-      real(cp) :: EperpASr_Rloc(nRstart:nRstop),EparASr_Rloc(nRstart:nRstop)
-      real(cp) :: EperpaxiASr_Rloc(nRstart:nRstop),EparaxiASr_Rloc(nRstart:nRstop)
-      real(cp) :: ekinS_Rloc(nRstart:nRstop),ekinL_Rloc(nRstart:nRstop)
-      real(cp) :: volS_Rloc(nRstart:nRstop)
-
       !--- Nonlinear magnetic boundary conditions needed in s_updateB.f :
-      complex(cp) :: br_vt_lm_cmb(lmP_max)    ! product br*vt at CMB
-      complex(cp) :: br_vp_lm_cmb(lmP_max)    ! product br*vp at CMB
-      complex(cp) :: br_vt_lm_icb(lmP_max)    ! product br*vt at ICB
-      complex(cp) :: br_vp_lm_icb(lmP_max)    ! product br*vp at ICB
+      complex(cp) :: br_vt_lm_cmb(lm_max)    ! product br*vt at CMB
+      complex(cp) :: br_vp_lm_cmb(lm_max)    ! product br*vp at CMB
+      complex(cp) :: br_vt_lm_icb(lm_max)    ! product br*vt at ICB
+      complex(cp) :: br_vp_lm_icb(lm_max)    ! product br*vp at ICB
       complex(cp) :: b_nl_cmb(lm_max)         ! nonlinear bc for b at CMB
       complex(cp) :: aj_nl_cmb(lm_max)        ! nonlinear bc for aj at CMB
       complex(cp) :: aj_nl_icb(lm_max)        ! nonlinear bc for dr aj at ICB
@@ -269,20 +257,6 @@ contains
          l_pure=.false.
          l_mat_time=.false.
 
-#ifdef WITH_MPI
-         ! Broadcast omega_ic and omega_ma
-         if ( l_parallel_solve ) then
-            if ( l_rot_ic ) call MPI_Bcast(omega_ic,1,MPI_DEF_REAL,n_procs-1, &
-                                 &         MPI_COMM_WORLD,ierr)
-            if ( l_rot_ma ) call MPI_Bcast(omega_ma,1,MPI_DEF_REAL,0,MPI_COMM_WORLD,ierr)
-         else
-            if ( l_rot_ic ) call MPI_Bcast(omega_ic,1,MPI_DEF_REAL,rank_with_l1m0, &
-                                 &         MPI_COMM_WORLD,ierr)
-            if ( l_rot_ma ) call MPI_Bcast(omega_ma,1,MPI_DEF_REAL,rank_with_l1m0, &
-                                 &         MPI_COMM_WORLD,ierr)
-         end if
-#endif
-
          !----------------
          !-- This handling of the signal files is quite expensive
          !-- as the file can be read only on one rank and the result
@@ -324,17 +298,17 @@ contains
          if ( time >= tEND .and. tEND /= 0.0_cp ) l_stop_time=.true.
 
          !-- Checking logic for output:
-         l_graph= l_correct_step(n_time_step-1,time,timeLast,n_time_steps,       &
-         &                       n_graph_step,n_graphs,n_t_graph,t_graph,0) .or. &
+         l_graph= l_correct_step(n_time_step-1,time,timeLast,n_time_steps,     &
+         &                       n_graph_step,n_graphs,n_t_graph,t_graph) .or. &
          &                  n_graph_signal == 1
          n_graph_signal=0   ! reset interrupt signal !
          l_spectrum=                                                             &
          &              l_correct_step(n_time_step-1,time,timeLast,n_time_steps, &
-         &                n_spec_step,n_specs,n_t_spec,t_spec,0) .or.            &
+         &                n_spec_step,n_specs,n_t_spec,t_spec) .or.              &
          &                n_spec_signal == 1
          l_frame= l_movie .and. (                                                &
          &             l_correct_step(n_time_step-1,time,timeLast,n_time_steps,  &
-         &             n_movie_step,n_movie_frames,n_t_movie,t_movie,0) .or.     &
+         &             n_movie_step,n_movie_frames,n_t_movie,t_movie) .or.       &
          &                   n_time_steps_go == 1 )
          if ( l_mag .or. l_mag_LF ) then
             l_dtB=( l_frame .and. l_dtBmovie ) .or. ( l_log .and. l_DTrMagSpec )
@@ -342,54 +316,54 @@ contains
 
          lTOframe=l_TOmovie .and.                                                &
          &          l_correct_step(n_time_step-1,time,timeLast,n_time_steps,     &
-         &          n_TOmovie_step,n_TOmovie_frames,n_t_TOmovie,t_TOmovie,0)
+         &          n_TOmovie_step,n_TOmovie_frames,n_t_TOmovie,t_TOmovie)
 
          l_probe_out=l_probe .and.                                               &
          &          l_correct_step(n_time_step-1,time,timeLast,n_time_steps,     &
-         &          n_probe_step,n_probe_out,n_t_probe,t_probe,0)
+         &          n_probe_step,n_probe_out,n_t_probe,t_probe)
 
          !-- Potential files
          l_pot= l_correct_step(n_time_step-1,time,timeLast,n_time_steps, &
-         &                       n_pot_step,n_pots,n_t_pot,t_pot,0) .or. &
+         &                       n_pot_step,n_pots,n_t_pot,t_pot) .or.   &
          &                  n_pot_signal == 1
          n_pot_signal=0   ! reset interrupt signal !
 
          l_new_rst_file=                                                         &
          &             l_correct_step(n_time_step-1,time,timeLast,n_time_steps,  &
-         &                            n_rst_step,n_rsts,n_t_rst,t_rst,0) .or.    &
+         &                            n_rst_step,n_rsts,n_t_rst,t_rst) .or.      &
          &             n_rst_signal == 1
          n_rst_signal=0
          l_store= l_new_rst_file .or.                                            &
          &             l_correct_step(n_time_step-1,time,timeLast,n_time_steps,  &
-         &                            0,n_stores,0,t_rst,0)
+         &                            0,n_stores,0,t_rst)
 
          l_log= l_correct_step(n_time_step-1,time,timeLast,n_time_steps,  &
-         &                            n_log_step,n_logs,n_t_log,t_log,0)
+         &                            n_log_step,n_logs,n_t_log,t_log)
          l_cmb= l_cmb_field .and.                                                &
          &             l_correct_step(n_time_step-1,time,timeLast,n_time_steps,  &
-         &                            n_cmb_step,n_cmbs,n_t_cmb,t_cmb,0)
+         &                            n_cmb_step,n_cmbs,n_t_cmb,t_cmb)
          l_r= l_r_field .and.                                                    &
          &             l_correct_step(n_time_step-1,time,timeLast,n_time_steps,  &
          &                            n_r_field_step,n_r_fields,n_t_r_field,     &
-         &                            t_r_field,0)
+         &                            t_r_field)
          l_logNext=.false.
          if ( n_time_step+1 <= n_time_steps+1 )                                  &
          &             l_logNext=                                                &
          &             l_correct_step(n_time_step,time+tscheme%dt(1),timeLast,   &
-         &                   n_time_steps,n_log_step,n_logs,n_t_log,t_log,0)
+         &                   n_time_steps,n_log_step,n_logs,n_t_log,t_log)
          lTOCalc= n_time_step > 2 .and. l_TO .and.                   &
          &               l_correct_step(n_time_step-1,time,timeLast, &
-         &               n_time_steps,n_TO_step,n_TOs,n_t_TO,t_TO,0)
+         &               n_time_steps,n_TO_step,n_TOs,n_t_TO,t_TO)
          lTOnext     =.false.
          lTOframeNext=.false.
          if ( n_time_step+1 <= n_time_steps+1 ) then
             lTONext= l_TO .and.                                            &
             &                l_correct_step(n_time_step,time+tscheme%dt(1),&
-            &                timeLast,n_time_steps,n_TO_step,n_TOs,n_t_TO,t_TO,0)
+            &                timeLast,n_time_steps,n_TO_step,n_TOs,n_t_TO,t_TO)
             lTOframeNext= l_TOmovie .and.                                   &
             &                l_correct_step(n_time_step,time+tscheme%dt(1), &
             &                timeLast,n_time_steps,n_TOmovie_step,          &
-            &                n_TOmovie_frames,n_t_TOmovie,t_TOmovie,0)
+            &                n_TOmovie_frames,n_t_TOmovie,t_TOmovie)
          end if
          lTONext      =lTOnext.or.lTOframeNext
          lTONext2     =.false.
@@ -398,11 +372,11 @@ contains
             lTONext2= l_TO .and.                                                 &
             &                l_correct_step(n_time_step+1,time+2*tscheme%dt(1),  &
             &                                timeLast,n_time_steps,n_TO_step,    &
-            &                                            n_TOs,n_t_TO,t_TO,0)
+            &                                            n_TOs,n_t_TO,t_TO)
             lTOframeNext2= l_TOmovie .and.                                      &
             &                l_correct_step(n_time_step+1,time+2*tscheme%dt(1), &
             &                             timeLast,n_time_steps,n_TOmovie_step, &
-            &                       n_TOmovie_frames,n_t_TOmovie,t_TOmovie,0)
+            &                       n_TOmovie_frames,n_t_TOmovie,t_TOmovie)
          end if
          lTONext2=lTOnext2.or.lTOframeNext2
 
@@ -433,22 +407,43 @@ contains
          end if
 
          lHelCalc     =l_hel        .and. l_log
+         lHemiCalc    =l_hemi       .and. l_log
          lPowerCalc   =l_power      .and. l_log
          lPerpParCalc =l_perpPar    .and. l_log
-         lGeosCalc    =l_par        .and. l_log
+         lGeosCalc    =(l_par .and. l_log) .or. ( l_frame .and. l_geosMovie )
          lFluxProfCalc=l_FluxProfs  .and. l_log
          lViscBcCalc  =l_ViscBcCalc .and. l_log
+         lOnsetCalc   =l_onset      .and. (l_log .or. l_logNext)
 
          l_HT  = (l_frame .and. l_movie) .or. lViscBcCalc
          lPressCalc=lRmsCalc .or. ( l_PressGraph .and. l_graph )  &
          &            .or. lFluxProfCalc
          lPressNext=( l_RMS .or. l_FluxProfs ) .and. l_logNext
+         lP00Next=( l_RMS .or. l_FluxProfs .or. l_heat .or. l_chemical_conv) &
+         &          .and. l_logNext
+         lP00Transp= (l_heat .or. l_chemical_conv) .and. l_log
 
-         if ( l_graph ) call open_graph_file(n_time_step, time, l_ave=.false.)
+         if ( l_graph .and. (.not. l_onset) ) &
+         &        call open_graph_file(n_time_step, time, l_ave=.false.)
 
          tscheme%istage = 1
 
          do n_stage=1,tscheme%nstages
+
+#ifdef WITH_MPI
+            ! Broadcast omega_ic and omega_ma
+            if ( l_parallel_solve ) then
+               if ( l_rot_ic ) call MPI_Bcast(omega_ic,1,MPI_DEF_REAL,n_procs-1, &
+                                    &         MPI_COMM_WORLD,ierr)
+               if ( l_rot_ma ) call MPI_Bcast(omega_ma,1,MPI_DEF_REAL,0,MPI_COMM_WORLD,ierr)
+            else
+               if ( l_rot_ic ) call MPI_Bcast(omega_ic,1,MPI_DEF_REAL,rank_with_l1m0, &
+                                    &         MPI_COMM_WORLD,ierr)
+               if ( l_rot_ma ) call MPI_Bcast(omega_ma,1,MPI_DEF_REAL,rank_with_l1m0, &
+                                    &         MPI_COMM_WORLD,ierr)
+            end if
+#endif
+
 
             !--- Now the real work starts with the radial loop that calculates
             !    the nonlinear terms:
@@ -461,20 +456,23 @@ contains
             !-- Storage or special calculatons computed in radial loop need to be
             !-- only done on the first sub-stage
             !------------------------
-            l_graph       = l_graph       .and. (tscheme%istage==1)
-            l_frame       = l_frame       .and. (tscheme%istage==1)
-            lTOCalc       = lTOCalc       .and. (tscheme%istage==1)
-            lTONext       = lTONext       .and. (tscheme%istage==1)
-            lTONext2      = lTONext2      .and. (tscheme%istage==1)
-            lHelCalc      = lHelCalc      .and. (tscheme%istage==1)
-            lPowerCalc    = lPowerCalc    .and. (tscheme%istage==1)
-            lRmsCalc      = lRmsCalc      .and. (tscheme%istage==1)
-            lPressCalc    = lPressCalc    .and. (tscheme%istage==1)
-            lViscBcCalc   = lViscBcCalc   .and. (tscheme%istage==1)
-            lFluxProfCalc = lFluxProfCalc .and. (tscheme%istage==1)
-            lPerpParCalc  = lPerpParCalc  .and. (tscheme%istage==1)
-            lGeosCalc     = lGeosCalc     .and. (tscheme%istage==1)
-            l_probe_out   = l_probe_out   .and. (tscheme%istage==1)
+            l_graph       = l_graph       .and. (tscheme%istage==1) .and. (.not. l_onset)
+            l_frame       = l_frame       .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lTOCalc       = lTOCalc       .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lTONext       = lTONext       .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lTONext2      = lTONext2      .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lHelCalc      = lHelCalc      .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lHemiCalc     = lHemiCalc     .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lPowerCalc    = lPowerCalc    .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lRmsCalc      = lRmsCalc      .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lPressCalc    = lPressCalc    .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lP00Transp    = lP00Transp    .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lViscBcCalc   = lViscBcCalc   .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lOnsetCalc    = lOnsetCalc    .and. (tscheme%istage==1)
+            lFluxProfCalc = lFluxProfCalc .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lPerpParCalc  = lPerpParCalc  .and. (tscheme%istage==1) .and. (.not. l_onset)
+            lGeosCalc     = lGeosCalc     .and. (tscheme%istage==1) .and. (.not. l_onset)
+            l_probe_out   = l_probe_out   .and. (tscheme%istage==1) .and. (.not. l_onset)
 
             if ( tscheme%l_exp_calc(n_stage) ) then
 
@@ -494,7 +492,7 @@ contains
                        &           dtLast,lTOCalc,lTONext,lTONext2,lHelCalc,           &
                        &           lPowerCalc,lRmsCalc,lPressCalc,lPressNext,          &
                        &           lViscBcCalc,lFluxProfCalc,lPerpParCalc,lGeosCalc,   &
-                       &           l_probe_out,dsdt%expl(:,:,tscheme%istage),          &
+                       &           lHemiCalc,l_probe_out,dsdt%expl(:,:,tscheme%istage),&
                        &           dwdt%expl(:,:,tscheme%istage),                      &
                        &           dzdt%expl(:,:,tscheme%istage),                      &
                        &           dpdt%expl(:,:,tscheme%istage),                      &
@@ -504,20 +502,14 @@ contains
                        &           djdt%expl(:,:,tscheme%istage),dVxVhLM_Rloc,         &
                        &           dVxBhLM_Rloc,dVSrLM_Rloc,dVXirLM_Rloc,              &
                        &           lorentz_torque_ic,lorentz_torque_ma,br_vt_lm_cmb,   &
-                       &           br_vp_lm_cmb,br_vt_lm_icb,br_vp_lm_icb,HelASr_Rloc, &
-                       &           Hel2ASr_Rloc,HelnaASr_Rloc,Helna2ASr_Rloc,          &
-                       &           HelEAASr_Rloc,viscASr_Rloc,uhASr_Rloc,duhASr_Rloc,  &
-                       &           gradsASr_Rloc,fconvASr_Rloc,fkinASr_Rloc,           &
-                       &           fviscASr_Rloc,fpoynASr_Rloc,fresASr_Rloc,           &
-                       &           EperpASr_Rloc,EparASr_Rloc,EperpaxiASr_Rloc,        &
-                       &           EparaxiASr_Rloc,ekinS_Rloc,ekinL_Rloc,volS_Rloc,    &
-                       &           dtrkc_Rloc,dthkc_Rloc)
+                       &           br_vp_lm_cmb,br_vt_lm_icb,br_vp_lm_icb,dtrkc_Rloc,  &
+                       &           dthkc_Rloc)
                   else
                   call radialLoopG(l_graph, l_frame,time,timeStage,tscheme,            &
                        &           dtLast,lTOCalc,lTONext,lTONext2,lHelCalc,           &
                        &           lPowerCalc,lRmsCalc,lPressCalc,lPressNext,          &
                        &           lViscBcCalc,lFluxProfCalc,lPerpParCalc,lGeosCalc,   &
-                       &           l_probe_out,dsdt%expl(:,:,tscheme%istage),          &
+                       &           lHemiCalc,l_probe_out,dsdt%expl(:,:,tscheme%istage),&
                        &           dwdt%expl(:,:,tscheme%istage),                      &
                        &           dzdt%expl(:,:,tscheme%istage),                      &
                        &           dpdt%expl(:,:,tscheme%istage),                      &
@@ -526,32 +518,20 @@ contains
                        &           dbdt_Rloc,djdt_Rloc,dVxVhLM_Rloc,                   &
                        &           dVxBhLM_Rloc,dVSrLM_Rloc,dVXirLM_Rloc,              &
                        &           lorentz_torque_ic,lorentz_torque_ma,br_vt_lm_cmb,   &
-                       &           br_vp_lm_cmb,br_vt_lm_icb,br_vp_lm_icb,HelASr_Rloc, &
-                       &           Hel2ASr_Rloc,HelnaASr_Rloc,Helna2ASr_Rloc,          &
-                       &           HelEAASr_Rloc,viscASr_Rloc,uhASr_Rloc,duhASr_Rloc,  &
-                       &           gradsASr_Rloc,fconvASr_Rloc,fkinASr_Rloc,           &
-                       &           fviscASr_Rloc,fpoynASr_Rloc,fresASr_Rloc,           &
-                       &           EperpASr_Rloc,EparASr_Rloc,EperpaxiASr_Rloc,        &
-                       &           EparaxiASr_Rloc,ekinS_Rloc,ekinL_Rloc,volS_Rloc,    &
-                       &           dtrkc_Rloc,dthkc_Rloc)
+                       &           br_vp_lm_cmb,br_vt_lm_icb,br_vp_lm_icb,dtrkc_Rloc,  &
+                       &           dthkc_Rloc)
                   end if
                else
-                  call radialLoopG(l_graph, l_frame,time,timeStage,tscheme,            &
-                       &           dtLast,lTOCalc,lTONext,lTONext2,lHelCalc,           &
-                       &           lPowerCalc,lRmsCalc,lPressCalc,lPressNext,          &
-                       &           lViscBcCalc,lFluxProfCalc,lPerpParCalc,lGeosCalc,   &
-                       &           l_probe_out,dsdt_Rloc,dwdt_Rloc,dzdt_Rloc,dpdt_Rloc,&
-                       &           dxidt_Rloc,dphidt_Rloc,dbdt_Rloc,djdt_Rloc,         &
-                       &           dVxVhLM_Rloc,dVxBhLM_Rloc,dVSrLM_Rloc,dVXirLM_Rloc, &
-                       &           lorentz_torque_ic,lorentz_torque_ma,br_vt_lm_cmb,   &
-                       &           br_vp_lm_cmb,br_vt_lm_icb,br_vp_lm_icb,HelASr_Rloc, &
-                       &           Hel2ASr_Rloc,HelnaASr_Rloc,Helna2ASr_Rloc,          &
-                       &           HelEAASr_Rloc,viscASr_Rloc,uhASr_Rloc,duhASr_Rloc,  &
-                       &           gradsASr_Rloc,fconvASr_Rloc,fkinASr_Rloc,           &
-                       &           fviscASr_Rloc,fpoynASr_Rloc,fresASr_Rloc,           &
-                       &           EperpASr_Rloc,EparASr_Rloc,EperpaxiASr_Rloc,        &
-                       &           EparaxiASr_Rloc,ekinS_Rloc,ekinL_Rloc,volS_Rloc,    &
-                       &           dtrkc_Rloc,dthkc_Rloc)
+                  call radialLoopG(l_graph, l_frame,time,timeStage,tscheme,             &
+                       &           dtLast,lTOCalc,lTONext,lTONext2,lHelCalc,            &
+                       &           lPowerCalc,lRmsCalc,lPressCalc,lPressNext,           &
+                       &           lViscBcCalc,lFluxProfCalc,lPerpParCalc,lGeosCalc,    &
+                       &           lHemiCalc,l_probe_out,dsdt_Rloc,dwdt_Rloc,dzdt_Rloc, &
+                       &           dpdt_Rloc,dxidt_Rloc,dphidt_Rloc,dbdt_Rloc,djdt_Rloc,&
+                       &           dVxVhLM_Rloc,dVxBhLM_Rloc,dVSrLM_Rloc,dVXirLM_Rloc,  &
+                       &           lorentz_torque_ic,lorentz_torque_ma,br_vt_lm_cmb,    &
+                       &           br_vp_lm_cmb,br_vt_lm_icb,br_vp_lm_icb,dtrkc_Rloc,   &
+                       &           dthkc_Rloc)
                end if
                call rLoop_counter%stop_count()
 
@@ -659,7 +639,7 @@ contains
                ! Finish assembing the explicit terms
                !---------------
                call lmLoop_counter%start_count()
-               if ( .not. l_finish_exp_early ) then
+               if ( (.not. l_finish_exp_early) ) then
                   call f_exp_counter%start_count()
                   call finish_explicit_assembly(omega_ic,w_LMloc,b_ic_LMloc,         &
                        &                        aj_ic_LMloc,                         &
@@ -690,20 +670,15 @@ contains
                if ( lVerbose ) write(output_unit,*) "! start real output"
                call io_counter%start_count()
                if ( l_parallel_solve .and. (l_log .or. l_spectrum .or. lTOCalc .or. &
-               &    l_dtB .or. l_cmb .or. l_r .or. l_pot .or. l_store .or. l_frame) ) then
-                  call transp_Rloc_to_LMloc_IO(lPressCalc)
+               &    l_dtB .or. l_cmb .or. l_r .or. lOnsetCalc .or. l_pot .or.       &
+               &    l_store .or. l_frame) ) then
+                  call transp_Rloc_to_LMloc_IO(lPressCalc .or. lP00Transp)
                end if
-               call output(time,tscheme,n_time_step,l_stop_time,l_pot,l_log,      &
-                    &      l_graph,lRmsCalc,l_store,l_new_rst_file,               &
-                    &      l_spectrum,lTOCalc,lTOframe,                           &
-                    &      l_frame,n_frame,l_cmb,n_cmb_sets,l_r,                  &
-                    &      lorentz_torque_ic,lorentz_torque_ma,dbdt_CMB_LMloc,    &
-                    &      HelASr_Rloc,Hel2ASr_Rloc,HelnaASr_Rloc,Helna2ASr_Rloc, &
-                    &      HelEAASr_Rloc,viscASr_Rloc,uhASr_Rloc,duhASr_Rloc,     &
-                    &      gradsASr_Rloc,fconvASr_Rloc,fkinASr_Rloc,fviscASr_Rloc,&
-                    &      fpoynASr_Rloc,fresASr_Rloc,EperpASr_Rloc,EparASr_Rloc, &
-                    &      EperpaxiASr_Rloc,EparaxiASr_Rloc,ekinS_Rloc,ekinL_Rloc,&
-                    &      volS_Rloc)
+               call output(time,tscheme,n_time_step,l_stop_time,l_pot,l_log,       &
+                    &      l_graph,lRmsCalc,l_store,l_new_rst_file,lOnsetCalc,     &
+                    &      l_spectrum,lTOCalc,lTOframe,                            &
+                    &      l_frame,n_frame,l_cmb,n_cmb_sets,l_r,                   &
+                    &      lorentz_torque_ic,lorentz_torque_ma,dbdt_CMB_LMloc)
                call io_counter%stop_count()
                if ( lVerbose ) write(output_unit,*) "! output finished"
 
@@ -717,8 +692,17 @@ contains
                !---------------------
                !-- Checking Courant criteria, l_new_dt and dt_new are output
                !---------------------
-               call dt_courant(l_new_dt,tscheme%dt(1),dt_new,dtMax,dtrkc_Rloc, &
-                    &          dthkc_Rloc,time)
+               if ( .not. l_onset ) then
+                  call dt_courant(l_new_dt,tscheme%dt(1),dt_new,dtMax,dtrkc_Rloc, &
+                       &          dthkc_Rloc,time)
+               else
+                  dt_new=dtMax
+                  if ( dt_new /= tscheme%dt(1) ) then
+                     l_new_dt = .true.
+                  else
+                     l_new_dt = .false.
+                  end if
+               end if
 
                !--------------------
                !-- Set weight arrays
@@ -762,8 +746,8 @@ contains
                call lmLoop_counter%start_count()
                if ( l_parallel_solve ) then
                   call LMLoop_Rdist(timeStage,time,tscheme,lMat,lRmsNext,lPressNext, &
-                       &            dsdt,dwdt,dzdt,dpdt,dxidt,dphidt,dbdt,djdt,      &
-                       &            dbdt_ic,djdt_ic,domega_ma_dt,domega_ic_dt,       &
+                       &            lP00Next,dsdt,dwdt,dzdt,dpdt,dxidt,dphidt,dbdt,  &
+                       &            djdt,dbdt_ic,djdt_ic,domega_ma_dt,domega_ic_dt,  &
                        &            lorentz_torque_ma_dt,lorentz_torque_ic_dt,       &
                        &            b_nl_cmb,aj_nl_cmb,aj_nl_icb)
                else

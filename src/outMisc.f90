@@ -1,25 +1,30 @@
 module outMisc_mod
    !
    ! This module contains several subroutines that can compute and store
-   ! various informations: helicity, heat transfer.
+   ! various informations: helicity (helicity.TAG), heat transfer (heat.TAG),
+   ! phase field (phase.TAG) and North/South hemisphericity of energies (hemi.TAG)
    !
 
    use parallel_mod
    use precision_mod
-   use communications, only: gather_from_Rloc
-   use truncation, only: l_max, n_r_max, lm_max, nlat_padded, n_theta_max
-   use radial_data, only: n_r_icb, n_r_cmb, nRstart, nRstop
-   use radial_functions, only: r_icb, rscheme_oc, kappa,         &
-       &                       r_cmb,temp0, r, rho0, dLtemp0,    &
-       &                       dLalpha0, beta, orho1, alpha0,    &
-       &                       otemp1, ogrun, rscheme_oc
-   use physical_parameters, only: ViscHeatFac, ThExpNb, opr, stef
-   use num_param, only: lScale, eScale
-   use blocking, only: llm, ulm, lo_map
+   use mem_alloc, only: bytes_allocated
+   use communications, only: gather_from_Rloc, gather_from_lo_to_rank0
+   use truncation, only: l_max, n_r_max, nlat_padded, n_theta_max, n_r_maxMag, &
+       &                 n_phi_max, lm_max, m_min, m_max, minc
+   use radial_data, only: n_r_icb, n_r_cmb, nRstart, nRstop, nRstartMag, nRstopMag
+   use radial_functions, only: r_icb, rscheme_oc, kappa, r_cmb,temp0, r, rho0, &
+       &                       dLtemp0, dLalpha0, beta, orho1, alpha0, otemp1, &
+       &                       ogrun, rscheme_oc, or2, orho2, or4
+   use physical_parameters, only: ViscHeatFac, ThExpNb, opr, stef, LFfac
+   use num_param, only: lScale, eScale, vScale
+   use blocking, only: llm, ulm, lo_map, lm2
+   use radial_der, only: get_dr
    use mean_sd, only: mean_sd_type
-   use horizontal_data, only: gauss, theta_ord, n_theta_cal2ord
-   use logic, only: l_save_out, l_anelastic_liquid, l_heat, l_hel, &
-       &            l_temperature_diff, l_chemical_conv, l_phase_field
+   use horizontal_data, only: gauss, theta_ord, n_theta_cal2ord,  &
+       &                      O_sin_theta_E2
+   use logic, only: l_save_out, l_anelastic_liquid, l_heat, l_hel, l_hemi, &
+       &            l_temperature_diff, l_chemical_conv, l_phase_field,    &
+       &            l_mag, l_onset
    use output_data, only: tag
    use constants, only: pi, vol_oc, osq4pi, sq4pi, one, two, four, half, zero
    use start_fields, only: topcond, botcond, deltacond, topxicond, botxicond, &
@@ -34,19 +39,30 @@ module outMisc_mod
 
    type(mean_sd_type) :: TMeanR, SMeanR, PMeanR, XiMeanR, RhoMeanR, PhiMeanR
    integer :: n_heat_file, n_helicity_file, n_calls, n_phase_file
-   integer :: n_rmelt_file
+   integer :: n_rmelt_file, n_hemi_file, n_growth_sym_file, n_growth_asym_file
+   integer :: n_drift_sym_file, n_drift_asym_file
    character(len=72) :: heat_file, helicity_file, phase_file, rmelt_file
+   character(len=72) :: hemi_file, sym_file, asym_file, drift_sym_file
+   character(len=72) :: drift_asym_file
    real(cp) :: TPhiOld, Tphi
+   real(cp), allocatable :: ekinSr(:), ekinLr(:), volSr(:)
+   real(cp), allocatable :: hemi_ekin_r(:,:), hemi_vrabs_r(:,:)
+   real(cp), allocatable :: hemi_emag_r(:,:), hemi_brabs_r(:,:)
+   real(cp), allocatable :: HelASr(:,:), Hel2ASr(:,:)
+   real(cp), allocatable :: HelnaASr(:,:), Helna2ASr(:,:)
+   real(cp), allocatable :: HelEAASr(:)
+   complex(cp), allocatable :: coeff_old(:)
 
    public :: outHelicity, outHeat, initialize_outMisc_mod, finalize_outMisc_mod, &
-   &         outPhase
+   &         outPhase, outHemi, get_ekin_solid_liquid, get_helicity, get_hemi,   &
+   &         get_onset
 
 contains
 
-   subroutine initialize_outMisc_mod
+   subroutine initialize_outMisc_mod()
       !
-      ! This subroutine handles the opening the output diagnostic files that
-      ! have to do with heat transfer or helicity.
+      ! This subroutine handles the opening of some output diagnostic files that
+      ! have to do with heat transfer, helicity, phase field or hemisphericity
       !
 
       if (l_heat .or. l_chemical_conv) then
@@ -62,12 +78,38 @@ contains
       TPhiOld = 0.0_cp
       TPhi = 0.0_cp
 
-      helicity_file='helicity.'//tag
+      if ( l_hel ) then
+         helicity_file='helicity.'//tag
+         allocate( HelASr(nRstart:nRstop,2), Hel2ASr(nRstart:nRstop,2) )
+         allocate( HelnaASr(nRstart:nRstop,2), Helna2ASr(nRstart:nRstop,2) )
+         allocate( HelEAASr(nRstart:nRstop) )
+         HelASr(:,:)   =0.0_cp
+         Hel2ASr(:,:)  =0.0_cp
+         HelnaASr(:,:) =0.0_cp
+         Helna2ASr(:,:)=0.0_cp
+         HelEAASr(:)   =0.0_cp
+         bytes_allocated=bytes_allocated+9*(nRstop-nRstart+1)*SIZEOF_DEF_REAL
+      end if
+
+      if ( l_hemi ) then
+         hemi_file    ='hemi.'//tag
+         allocate( hemi_ekin_r(nRstart:nRstop,2), hemi_vrabs_r(nRstart:nRstop,2) )
+         hemi_ekin_r(:,:) =0.0_cp
+         hemi_vrabs_r(:,:)=0.0_cp
+         bytes_allocated=bytes_allocated+(nRstop-nRstart+1)*4*SIZEOF_DEF_REAL
+
+         if ( l_mag ) then
+            allocate( hemi_emag_r(nRstart:nRstop,2), hemi_brabs_r(nRstart:nRstop,2) )
+            hemi_emag_r(:,:) =0.0_cp
+            hemi_brabs_r(:,:)=0.0_cp
+            bytes_allocated=bytes_allocated+(nRstop-nRstart+1)*4*SIZEOF_DEF_REAL
+         end if
+      end if
+
       heat_file    ='heat.'//tag
       if ( rank == 0 .and. (.not. l_save_out) ) then
-         if ( l_hel ) then
-            open(newunit=n_helicity_file, file=helicity_file, status='new')
-         end if
+         if ( l_hel ) open(newunit=n_helicity_file, file=helicity_file, status='new')
+         if ( l_hemi ) open(newunit=n_hemi_file, file=hemi_file, status='new')
          if ( l_heat .or. l_chemical_conv ) then
             open(newunit=n_heat_file, file=heat_file, status='new')
          end if
@@ -76,18 +118,39 @@ contains
       if ( l_phase_field ) then
          phase_file='phase.'//tag
          rmelt_file='rmelt.'//tag
+         allocate( ekinSr(nRstart:nRstop), ekinLr(nRstart:nRstop), volSr(nRstart:nRstop) )
+         ekinSr(:)=0.0_cp
+         ekinLr(:)=0.0_cp
+         volSr(:) =0.0_cp
+         bytes_allocated=bytes_allocated+3*(nRstop-nRstart+1)*SIZEOF_DEF_REAL
          if ( rank == 0 .and. (.not. l_save_out) ) then
             open(newunit=n_phase_file, file=phase_file, status='new')
             open(newunit=n_rmelt_file, file=rmelt_file, status='new', form='unformatted')
          end if
       end if
 
+      if ( l_onset ) then
+         allocate(coeff_old(llm:ulm) )
+         bytes_allocated=bytes_allocated+(ulm-llm+1)*SIZEOF_DEF_COMPLEX
+         coeff_old(:)=zero
+         sym_file       ='growth_sym.'//tag
+         asym_file      ='growth_asym.'//tag
+         drift_sym_file ='drift_sym.'//tag
+         drift_asym_file='drift_asym.'//tag
+         if ( rank == 0 .and. (.not. l_save_out)) then
+            open(newunit=n_growth_sym_file, file=sym_file, status='new')
+            open(newunit=n_growth_asym_file, file=asym_file, status='new')
+            open(newunit=n_drift_sym_file, file=drift_sym_file, status='new')
+            open(newunit=n_drift_asym_file, file=drift_asym_file, status='new')
+         end if
+      end if
+
    end subroutine initialize_outMisc_mod
-!---------------------------------------------------------------------------
-   subroutine finalize_outMisc_mod
+!----------------------------------------------------------------------------------
+   subroutine finalize_outMisc_mod()
       !
       ! This subroutine handles the closing of the time series of
-      ! heat.TAG, hel.TAG and phase.TAG
+      ! heat.TAG, hel.TAG, hemi.TAG and phase.TAG
       !
 
       if ( l_heat .or. l_chemical_conv ) then
@@ -97,10 +160,29 @@ contains
          call XiMeanR%finalize()
          call RhoMeanR%finalize()
       end if
-      if ( l_phase_field ) call PhiMeanR%finalize()
+      if ( l_onset ) then
+         deallocate( coeff_old )
+         if ( rank == 0 .and. (.not. l_save_out) ) then
+            close(n_growth_sym_file)
+            close(n_growth_asym_file)
+            close(n_drift_sym_file)
+            close(n_drift_asym_file)
+         end if
+      end if
+      if ( l_hemi ) then 
+         deallocate( hemi_ekin_r, hemi_vrabs_r )
+         if ( l_mag ) deallocate( hemi_emag_r, hemi_brabs_r )
+      end if
+      if ( l_hel ) deallocate( HelASr, Hel2ASr, HelnaASr, Helna2ASr, HelEAASr )
+      
+      if ( l_phase_field ) then
+         deallocate( ekinSr, ekinLr, volSr )
+         call PhiMeanR%finalize()
+      end if
 
       if ( rank == 0 .and. (.not. l_save_out) ) then
          if ( l_hel ) close(n_helicity_file)
+         if ( l_hemi ) close(n_hemi_file)
          if ( l_heat .or. l_chemical_conv ) close(n_heat_file)
          if ( l_phase_field ) then
             close(n_phase_file)
@@ -109,20 +191,99 @@ contains
       end if
 
    end subroutine finalize_outMisc_mod
-!---------------------------------------------------------------------------
-   subroutine outHelicity(timeScaled,HelASr,Hel2ASr,HelnaASr,Helna2ASr,HelEAASr)
+!----------------------------------------------------------------------------------
+   subroutine outHemi(timeScaled)
       !
-      ! This subroutine is used to store informations about kinetic
-      ! helicity
+      ! This function handles the writing of outputs related to hemisphericity of 
+      ! the kinetic and magnetic energy between Northern and Southern hemispheres.
+      ! This is based on Wieland Dietrich's work (see Dietrich & Wicht, 2013).
+      ! Outputs are stored in the time series hemi.TAG
       !
 
       !-- Input of variables:
       real(cp), intent(in) :: timeScaled
-      real(cp), intent(in) :: HelASr(2,nRstart:nRstop)
-      real(cp), intent(in) :: Hel2ASr(2,nRstart:nRstop)
-      real(cp), intent(in) :: HelnaASr(2,nRstart:nRstop)
-      real(cp), intent(in) :: Helna2ASr(2,nRstart:nRstop)
-      real(cp), intent(in) :: HelEAASr(nRstart:nRstop)
+
+      !-- Local variables:
+      real(cp) :: hemi_ekin_r_N(n_r_max), hemi_ekin_r_S(n_r_max)
+      real(cp) :: hemi_vrabs_r_N(n_r_max), hemi_vrabs_r_S(n_r_max)
+      real(cp) :: hemi_emag_r_N(n_r_maxMag), hemi_emag_r_S(n_r_maxMag)
+      real(cp) :: hemi_brabs_r_N(n_r_maxMag), hemi_brabs_r_S(n_r_maxMag)
+      real(cp) :: ekinN, ekinS, vrabsN, vrabsS, hemi_ekin, hemi_vr
+      real(cp) :: emagN, emagS, brabsN, brabsS, hemi_emag, hemi_br, hemi_cmb
+
+      call gather_from_Rloc(hemi_ekin_r(:,1), hemi_ekin_r_N, 0)
+      call gather_from_Rloc(hemi_ekin_r(:,2), hemi_ekin_r_S, 0)
+      call gather_from_Rloc(hemi_vrabs_r(:,1), hemi_vrabs_r_N, 0)
+      call gather_from_Rloc(hemi_vrabs_r(:,2), hemi_vrabs_r_S, 0)
+      if ( l_mag ) then
+         call gather_from_Rloc(hemi_emag_r(:,1), hemi_emag_r_N, 0)
+         call gather_from_Rloc(hemi_emag_r(:,2), hemi_emag_r_S, 0)
+         call gather_from_Rloc(hemi_brabs_r(:,1), hemi_brabs_r_N, 0)
+         call gather_from_Rloc(hemi_brabs_r(:,2), hemi_brabs_r_S, 0)
+      end if
+
+      if ( rank == 0 ) then
+         !------ Integration over r
+         ekinN =eScale*rInt_R(hemi_ekin_r_N,r,rscheme_oc)
+         ekinS =eScale*rInt_R(hemi_ekin_r_S,r,rscheme_oc)
+         vrabsN=vScale*rInt_R(hemi_vrabs_r_N,r,rscheme_oc)
+         vrabsS=vScale*rInt_R(hemi_vrabs_r_S,r,rscheme_oc)
+         if ( l_mag ) then
+            emagN =LFfac*eScale*rInt_R(hemi_emag_r_N,r,rscheme_oc)
+            emagS =LFfac*eScale*rInt_R(hemi_emag_r_S,r,rscheme_oc)
+            brabsN=rInt_R(hemi_brabs_r_N,r,rscheme_oc)
+            brabsS=rInt_R(hemi_brabs_r_S,r,rscheme_oc)
+            if ( emagN+emagS > 0.0_cp ) then
+               hemi_emag=abs(emagN-emagS)/(emagN+emagS)
+               hemi_br  =abs(brabsN-brabsS)/(brabsN+brabsS)
+               hemi_cmb =abs(hemi_brabs_r_N(n_r_cmb)-hemi_brabs_r_S(n_r_cmb)) / &
+               &         (hemi_brabs_r_N(n_r_cmb)+hemi_brabs_r_S(n_r_cmb))
+            else
+               hemi_emag=0.0_cp
+               hemi_br  =0.0_cp
+               hemi_cmb =0.0_cp
+            end if
+         else
+            emagN    =0.0_cp
+            emagS    =0.0_cp
+            hemi_emag=0.0_cp
+            hemi_br  =0.0_cp
+            hemi_cmb =0.0_cp
+         end if
+
+         if ( ekinN+ekinS > 0.0_cp ) then
+            hemi_ekin=abs(ekinN-ekinS)/(ekinN+ekinS)
+            hemi_vr  =abs(vrabsN-vrabsS)/(vrabsN+vrabsS)
+         else
+            hemi_ekin=0.0_cp
+            hemi_vr  =0.0_cp
+         end if
+
+         if ( l_save_out ) then
+            open(newunit=n_hemi_file, file=hemi_file,   &
+            &    status='unknown', position='append')
+         end if
+
+         write(n_hemi_file,'(1P,ES20.12,7ES16.8)')                &
+         &     timeScaled, round_off(hemi_vr,one),                &
+         &     round_off(hemi_ekin,one), round_off(hemi_br,one),  &
+         &     round_off(hemi_emag,one), round_off(hemi_cmb,one), &
+         &     ekinN+ekinS, emagN+emagS
+
+         if ( l_save_out ) close(n_hemi_file)
+
+      end if
+
+   end subroutine outHemi
+!----------------------------------------------------------------------------------
+   subroutine outHelicity(timeScaled)
+      !
+      ! This subroutine is used to store informations about kinetic
+      ! helicity. Outputs are stored in the time series helicity.TAG
+      !
+
+      !-- Input of variables:
+      real(cp), intent(in) :: timeScaled
 
       !-- Local stuff:
       real(cp) :: HelNr_global(n_r_max), HelSr_global(n_r_max)
@@ -137,18 +298,17 @@ contains
       ! the arrays: Hel2Nr,Helna2Nr,HelEAr,HelNr,HelnaNr
       ! Hel2Sr,Helna2Sr,HelSr,HelnaSr
 
-      call gather_from_Rloc(Hel2Asr(1,:), Hel2Nr_global, 0)
-      call gather_from_Rloc(Helna2ASr(1,:), Helna2Nr_global, 0)
+      call gather_from_Rloc(Hel2Asr(:,1), Hel2Nr_global, 0)
+      call gather_from_Rloc(Helna2ASr(:,1), Helna2Nr_global, 0)
       call gather_from_Rloc(HelEAASr, HelEAr_global, 0)
-      call gather_from_Rloc(HelASr(1,:), HelNr_global, 0)
-      call gather_from_Rloc(HelnaASr(1,:), HelnaNr_global, 0)
-      call gather_from_Rloc(HelASr(2,:), HelSr_global, 0)
-      call gather_from_Rloc(Helna2ASr(2,:), Helna2Sr_global, 0)
-      call gather_from_Rloc(Hel2ASr(2,:), Hel2Sr_global, 0)
-      call gather_from_Rloc(HelnaASr(2,:), HelnaSr_global, 0)
+      call gather_from_Rloc(HelASr(:,1), HelNr_global, 0)
+      call gather_from_Rloc(HelnaASr(:,1), HelnaNr_global, 0)
+      call gather_from_Rloc(HelASr(:,2), HelSr_global, 0)
+      call gather_from_Rloc(Helna2ASr(:,2), Helna2Sr_global, 0)
+      call gather_from_Rloc(Hel2ASr(:,2), Hel2Sr_global, 0)
+      call gather_from_Rloc(HelnaASr(:,2), HelnaSr_global, 0)
 
       if ( rank == 0 ) then
-         !------ Integration over r without the boundaries and normalization:
          HelN  =rInt_R(HelNr_global*r*r,r,rscheme_oc)
          HelS  =rInt_R(HelSr_global*r*r,r,rscheme_oc)
          HelnaN=rInt_R(HelnaNr_global*r*r,r,rscheme_oc)
@@ -202,8 +362,8 @@ contains
       end if
 
    end subroutine outHelicity
-!---------------------------------------------------------------------------
-   subroutine outHeat(time,timePassed,timeNorm,l_stop_time,s,ds,p,dp,xi,dxi)
+!----------------------------------------------------------------------------------
+   subroutine outHeat(time,timePassed,timeNorm,l_stop_time,s,ds,p,xi,dxi)
       !
       ! This subroutine is used to store informations about heat transfer
       ! (i.e. Nusselt number, temperature, entropy, ...)
@@ -216,26 +376,24 @@ contains
       logical,     intent(in) :: l_stop_time
 
       !-- Input of scalar fields:
-      complex(cp), intent(in) :: s(llm:ulm,n_r_max)
-      complex(cp), intent(in) :: ds(llm:ulm,n_r_max)
-      complex(cp), intent(in) :: p(llm:ulm,n_r_max)
-      complex(cp), intent(in) :: dp(llm:ulm,n_r_max)
-      complex(cp), intent(in) :: xi(llm:ulm,n_r_max)
-      complex(cp), intent(in) :: dxi(llm:ulm,n_r_max)
+      complex(cp), intent(in) :: s(llm:ulm,n_r_max) ! Entropy/temperature
+      complex(cp), intent(in) :: ds(llm:ulm,n_r_max) ! Radial derivative of entropy/temp
+      complex(cp), intent(in) :: p(llm:ulm,n_r_max) ! Pressure
+      complex(cp), intent(in) :: xi(llm:ulm,n_r_max) ! Chemical composition
+      complex(cp), intent(in) :: dxi(llm:ulm,n_r_max) ! Radial derivative of xi
 
       !-- Local stuff:
-      real(cp) :: tmp(n_r_max)
+      real(cp) :: tmp(n_r_max), dp(n_r_max)
       real(cp) :: topnuss,botnuss,deltanuss
       real(cp) :: topsherwood,botsherwood,deltasherwood
-      real(cp) :: toptemp,bottemp
-      real(cp) :: topxi,botxi
-      real(cp) :: toppres,botpres,mass
-      real(cp) :: topentropy, botentropy
-      real(cp) :: topflux,botflux
+      real(cp) :: toptemp,bottemp,topxi,botxi,topflux,botflux
+      real(cp) :: toppres,botpres,mass,topentropy,botentropy
       character(len=76) :: filename
       integer :: n_r, filehandle
 
       if ( rank == 0 ) then
+         tmp(:) = real(p(1,:))
+         call get_dr(tmp, dp, n_r_max, rscheme_oc)
          n_calls = n_calls + 1
          if ( l_anelastic_liquid ) then
             if ( l_heat ) then
@@ -248,10 +406,9 @@ contains
                call XiMeanR%compute(osq4pi*real(xi(1,:)),n_calls,timePassed,timeNorm)
             endif
             call PMeanR%compute(osq4pi*real(p(1,:)),n_calls,timePassed,timeNorm)
-            tmp(:) = osq4pi*ThExpNb*alpha0(:)*( -rho0(:)*    &
-               &     real(s(1,:))+ViscHeatFac*(ThExpNb*      &
-               &     alpha0(:)*temp0(:)+ogrun(:))*           &
-               &     real(p(1,:)) )
+            tmp(:) = osq4pi*ThExpNb*alpha0(:)*( -rho0(:)*real(s(1,:)) +  &
+            &        ViscHeatFac*(ThExpNb*alpha0(:)*temp0(:)+ogrun(:))*  &
+            &        real(p(1,:)) )
             call RhoMeanR%compute(tmp(:),n_calls,timePassed,timeNorm)
          else
             if ( l_heat ) then
@@ -264,133 +421,167 @@ contains
                call XiMeanR%compute(osq4pi*real(xi(1,:)),n_calls,timePassed,timeNorm)
             endif
             call PMeanR%compute(osq4pi*real(p(1,:)),n_calls,timePassed,timeNorm)
-            tmp(:) = osq4pi*ThExpNb*alpha0(:)*( -rho0(:)* &
-               &     temp0(:)*real(s(1,:))+ViscHeatFac*   &
-               &     ogrun(:)*real(p(1,:)) )
+            tmp(:) = osq4pi*ThExpNb*alpha0(:)*( -rho0(:)*temp0(:)*real(s(1,:)) + &
+            &        ViscHeatFac*ogrun(:)*real(p(1,:)) )
             call RhoMeanR%compute(tmp(:),n_calls,timePassed,timeNorm)
          end if
 
          !-- Evaluate nusselt numbers (boundary heat flux density):
          toppres=osq4pi*real(p(1,n_r_cmb))
          botpres=osq4pi*real(p(1,n_r_icb))
-         if ( topcond /= 0.0_cp ) then
+         if ( l_anelastic_liquid ) then
 
-            if ( l_anelastic_liquid ) then
+            bottemp=osq4pi*real(s(1,n_r_icb))
+            toptemp=osq4pi*real(s(1,n_r_cmb))
 
-               bottemp=osq4pi*real(s(1,n_r_icb))
-               toptemp=osq4pi*real(s(1,n_r_cmb))
+            botentropy=otemp1(n_r_icb)*bottemp-ViscHeatFac*ThExpNb*   &
+            &          orho1(n_r_icb)*alpha0(n_r_icb)*botpres
+            topentropy=otemp1(n_r_cmb)*toptemp-ViscHeatFac*ThExpNb*   &
+            &          orho1(n_r_cmb)*alpha0(n_r_cmb)*toppres
 
-               botentropy=otemp1(n_r_icb)*bottemp-ViscHeatFac*ThExpNb*   &
-               &          orho1(n_r_icb)*alpha0(n_r_icb)*botpres
-               topentropy=otemp1(n_r_cmb)*toptemp-ViscHeatFac*ThExpNb*   &
-               &          orho1(n_r_cmb)*alpha0(n_r_cmb)*toppres
+            if ( l_temperature_diff ) then
 
-               if ( l_temperature_diff ) then
-
+               if ( abs(botcond) >= 1e-10_cp ) then
                   botnuss=-osq4pi/botcond*real(ds(1,n_r_icb))/lScale
-                  topnuss=-osq4pi/topcond*real(ds(1,n_r_cmb))/lScale
-                  botflux=-rho0(n_r_max)*real(ds(1,n_r_max))*osq4pi &
-                  &        *r_icb**2*four*pi*kappa(n_r_max)
-                  topflux=-rho0(1)*real(ds(1,1))*osq4pi &
-                  &        *r_cmb**2*four*pi*kappa(1)
-
-                  deltanuss = deltacond/(bottemp-toptemp)
-
                else
+                  botnuss=one
+               end if
+               if ( abs(topcond) >= 1e-10_cp ) then
+                  topnuss=-osq4pi/topcond*real(ds(1,n_r_cmb))/lScale
+               else
+                  topnuss=one
+               end if
+               botflux=-rho0(n_r_max)*real(ds(1,n_r_max))*osq4pi &
+               &        *r_icb**2*four*pi*kappa(n_r_max)
+               topflux=-rho0(1)*real(ds(1,1))*osq4pi &
+               &        *r_cmb**2*four*pi*kappa(1)
 
+               if ( bottemp /= toptemp ) then
+                  deltanuss=deltacond/(bottemp-toptemp)
+               else
+                  deltanuss=one
+               end if
+
+            else
+
+               if ( abs(botcond) >= 1e-10_cp ) then
                   botnuss=-osq4pi/botcond*(otemp1(n_r_icb)*( -dLtemp0(n_r_icb)* &
                   &        real(s(1,n_r_icb)) + real(ds(1,n_r_icb))) -          &
                   &        ViscHeatFac*ThExpNb*alpha0(n_r_icb)*orho1(n_r_icb)*( &
                   &         ( dLalpha0(n_r_icb)-beta(n_r_icb) )*                &
-                  &        real(p(1,n_r_icb)) + real(dp(1,n_r_icb)) ) ) / lScale
+                  &        real(p(1,n_r_icb)) + dp(n_r_icb) ) ) / lScale
+               else
+                  botnuss=one
+               end if
+               if ( abs(topcond) >= 1e-10_cp ) then
                   topnuss=-osq4pi/topcond*(otemp1(n_r_cmb)*( -dLtemp0(n_r_cmb)* &
                   &        real(s(1,n_r_cmb)) + real(ds(1,n_r_cmb))) -          &
                   &        ViscHeatFac*ThExpNb*alpha0(n_r_cmb)*orho1(n_r_cmb)*( &
                   &         ( dLalpha0(n_r_cmb)-beta(n_r_cmb) )*                &
-                  &        real(p(1,n_r_cmb)) + real(dp(1,n_r_cmb)) ) ) / lScale
-
-                  botflux=four*pi*r_icb**2*kappa(n_r_icb)*rho0(n_r_icb) *      &
-                  &       botnuss*botcond*lScale*temp0(n_r_icb)
-                  topflux=four*pi*r_cmb**2*kappa(n_r_cmb)*rho0(n_r_cmb) *      &
-                  &       topnuss*topcond*lScale*temp0(n_r_cmb)
-
-                  deltanuss = deltacond/(botentropy-topentropy)
-
+                  &        real(p(1,n_r_cmb)) + dp(n_r_cmb) ) ) / lScale
+               else
+                  topnuss=one
                end if
 
-            else ! s corresponds to entropy
+               botflux=four*pi*r_icb**2*kappa(n_r_icb)*rho0(n_r_icb) *      &
+               &       botnuss*botcond*lScale*temp0(n_r_icb)
+               topflux=four*pi*r_cmb**2*kappa(n_r_cmb)*rho0(n_r_cmb) *      &
+               &       topnuss*topcond*lScale*temp0(n_r_cmb)
 
-               botentropy=osq4pi*real(s(1,n_r_icb))
-               topentropy=osq4pi*real(s(1,n_r_cmb))
+               if ( botentropy /= topentropy ) then
+                  deltanuss=deltacond/(botentropy-topentropy)
+               else
+                  deltanuss=one
+               end if
 
-               bottemp   =temp0(n_r_icb)*botentropy+ViscHeatFac*ThExpNb*   &
-               &          orho1(n_r_icb)*temp0(n_r_icb)*alpha0(n_r_icb)*   &
-               &          botpres
-               toptemp   =temp0(n_r_cmb)*topentropy+ViscHeatFac*ThExpNb*   &
-               &          orho1(n_r_cmb)*temp0(n_r_cmb)*alpha0(n_r_cmb)*   &
-               &          toppres
+            end if
 
-               if ( l_temperature_diff ) then
+         else ! s corresponds to entropy
 
+            botentropy=osq4pi*real(s(1,n_r_icb))
+            topentropy=osq4pi*real(s(1,n_r_cmb))
+
+            bottemp=temp0(n_r_icb)*botentropy+ViscHeatFac*ThExpNb*   &
+            &       orho1(n_r_icb)*temp0(n_r_icb)*alpha0(n_r_icb)*   &
+            &       botpres
+            toptemp=temp0(n_r_cmb)*topentropy+ViscHeatFac*ThExpNb*   &
+            &       orho1(n_r_cmb)*temp0(n_r_cmb)*alpha0(n_r_cmb)*   &
+            &       toppres
+
+            if ( l_temperature_diff ) then
+
+               if ( abs(botcond) >= 1e-10_cp ) then
                   botnuss=-osq4pi/botcond*temp0(n_r_icb)*( dLtemp0(n_r_icb)*   &
                   &        real(s(1,n_r_icb)) + real(ds(1,n_r_icb)) +          &
                   &        ViscHeatFac*ThExpNb*alpha0(n_r_icb)*orho1(n_r_icb)*(&
                   &     ( dLalpha0(n_r_icb)+dLtemp0(n_r_icb)-beta(n_r_icb) )*  &
-                  &        real(p(1,n_r_icb)) + real(dp(1,n_r_icb)) ) ) / lScale
+                  &        real(p(1,n_r_icb)) + dp(n_r_icb) ) ) / lScale
+               else
+                  botnuss=one
+               end if
+               if ( abs(topcond) >= 1e-10_cp ) then
                   topnuss=-osq4pi/topcond*temp0(n_r_cmb)*( dLtemp0(n_r_cmb)*   &
                   &        real(s(1,n_r_cmb)) + real(ds(1,n_r_cmb)) +          &
                   &        ViscHeatFac*ThExpNb*alpha0(n_r_cmb)*orho1(n_r_cmb)*(&
                   &     ( dLalpha0(n_r_cmb)+dLtemp0(n_r_cmb)-beta(n_r_cmb) )*  &
-                  &        real(p(1,n_r_cmb)) + real(dp(1,n_r_cmb)) ) ) / lScale
-
-                  botflux=four*pi*r_icb**2*kappa(n_r_icb)*rho0(n_r_icb) *      &
-                  &       botnuss*botcond*lScale
-                  topflux=four*pi*r_cmb**2*kappa(n_r_cmb)*rho0(n_r_cmb) *      &
-                  &       topnuss*topcond*lScale
-
-                  deltanuss = deltacond/(bottemp-toptemp)
-
+                  &        real(p(1,n_r_cmb)) + dp(n_r_cmb) ) ) / lScale
                else
+                  topnuss=one
+               end if
 
+               botflux=four*pi*r_icb**2*kappa(n_r_icb)*rho0(n_r_icb) *      &
+               &       botnuss*botcond*lScale
+               topflux=four*pi*r_cmb**2*kappa(n_r_cmb)*rho0(n_r_cmb) *      &
+               &       topnuss*topcond*lScale
+
+               if ( bottemp /= toptemp ) then
+                  deltanuss=deltacond/(bottemp-toptemp)
+               else
+                  deltanuss=one
+               end if
+
+            else
+
+               if ( abs(botcond) >= 1e-10_cp ) then
                   botnuss=-osq4pi/botcond*real(ds(1,n_r_icb))/lScale
+               else
+                  botnuss=one
+               end if
+               if ( abs(topcond) >= 1e-10_cp ) then
                   topnuss=-osq4pi/topcond*real(ds(1,n_r_cmb))/lScale
-                  botflux=-rho0(n_r_max)*temp0(n_r_max)*real(ds(1,n_r_max))* &
-                  &        r_icb**2*sq4pi*kappa(n_r_max)/lScale
-                  topflux=-rho0(1)*temp0(1)*real(ds(1,1))/lScale*r_cmb**2* &
-                  &        sq4pi*kappa(1)
-                  if ( botentropy /= topentropy ) then
-                     deltanuss = deltacond/(botentropy-topentropy)
-                  else
-                     deltanuss = one
-                  end if
-
+               else
+                  topnuss=one
+               end if
+               botflux=-rho0(n_r_max)*temp0(n_r_max)*real(ds(1,n_r_max))* &
+               &        r_icb**2*sq4pi*kappa(n_r_max)/lScale
+               topflux=-rho0(1)*temp0(1)*real(ds(1,1))/lScale*r_cmb**2* &
+               &        sq4pi*kappa(1)
+               if ( botentropy /= topentropy ) then
+                  deltanuss=deltacond/(botentropy-topentropy)
+               else
+                  deltanuss=one
                end if
 
             end if
-         else
-            botnuss   =one
-            topnuss   =one
-            botflux   =0.0_cp
-            topflux   =0.0_cp
-            bottemp   =0.0_cp
-            toptemp   =0.0_cp
-            botentropy=0.0_cp
-            topentropy=0.0_cp
-            deltanuss =one
+
          end if
 
          if ( l_chemical_conv ) then
-            if ( topxicond/=0.0_cp ) then
-               topxi=osq4pi*real(xi(1,n_r_cmb))
-               botxi=osq4pi*real(xi(1,n_r_icb))
+            topxi=osq4pi*real(xi(1,n_r_cmb))
+            botxi=osq4pi*real(xi(1,n_r_icb))
+            if ( abs(botxicond) >= 1e-10_cp ) then
                botsherwood=-osq4pi/botxicond*real(dxi(1,n_r_icb))/lScale
-               topsherwood=-osq4pi/topxicond*real(dxi(1,n_r_cmb))/lScale
-               deltasherwood = deltaxicond/(botxi-topxi)
             else
-               topxi=0.0_cp
-               botxi=0.0_cp
                botsherwood=one
+            end if
+            if ( abs(topxicond) >= 1e-10_cp ) then
+               topsherwood=-osq4pi/topxicond*real(dxi(1,n_r_cmb))/lScale
+            else
                topsherwood=one
+            end if
+            if ( botxi /= topxi ) then
+               deltasherwood=deltaxicond/(botxi-topxi)
+            else
                deltasherwood=one
             end if
          else
@@ -451,9 +642,8 @@ contains
       end if ! rank == 0
 
    end subroutine outHeat
-!---------------------------------------------------------------------------
-   subroutine outPhase(time, timePassed, timeNorm, l_stop_time, nLogs, s, ds, &
-              &        phi, ekinSr, ekinLr, volSr)
+!----------------------------------------------------------------------------------
+   subroutine outPhase(time, timePassed, timeNorm, l_stop_time, nLogs, s, ds, phi)
       !
       ! This subroutine handles the writing of time series related with phase
       ! field: phase.TAG
@@ -468,9 +658,6 @@ contains
       complex(cp), intent(in) :: s(llm:ulm,n_r_max)     ! Entropy/Temperature
       complex(cp), intent(in) :: ds(llm:ulm,n_r_max)    ! Radial der. of Entropy/Temperature
       complex(cp), intent(in) :: phi(llm:ulm,n_r_max)   ! Phase field
-      real(cp),    intent(in) :: ekinSr(nRstart:nRstop) ! Kinetic energy in solidus
-      real(cp),    intent(in) :: ekinLr(nRstart:nRstop) ! Kinetic energy in liquidus
-      real(cp),    intent(in) :: volSr(nRstart:nRstop)  ! Volume of the solid phase
 
       !-- Local variables
       character(len=72) :: filename
@@ -618,5 +805,329 @@ contains
       end if
 
    end subroutine outPhase
-!---------------------------------------------------------------------------
+!----------------------------------------------------------------------------------
+   subroutine get_hemi(vr,vt,vp,nR,field)
+      !
+      !   This subroutine is used to compute kinetic or magnetic energy
+      !   in Northern or Southern hemipshere.
+      !
+
+      !-- Input of variables
+      integer,          intent(in) :: nR ! radial level
+      real(cp),         intent(in) :: vr(:,:),vt(:,:),vp(:,:)
+      character(len=1), intent(in) :: field
+
+      !-- Output variables:
+
+      !-- Local variables:
+      real(cp) :: enAS(2) ! energy in North/South hemi at radius nR
+      real(cp) :: vrabsAS(2)! abs(vr or Br) in North/South hemi at radius nR
+      real(cp) :: en, vrabs, phiNorm, fac
+      integer :: nTheta, nPhi, nTh
+
+      enAS(:)   =0.0_cp
+      vrabsAS(:)=0.0_cp
+      phiNorm=two*pi/real(n_phi_max,cp)
+      if ( field == 'V' ) then
+         fac = orho1(nR)
+      else if ( field == 'B' ) then
+         fac = one
+      end if
+      !--- Helicity:
+      !$omp parallel do default(shared)   &
+      !$omp& private(nTheta,vrabs,en,nTh) &
+      !$omp& reduction(+:enAS,vrabsAS)
+      do nPhi=1,n_phi_max
+         do nTheta=1,n_theta_max
+            nTh=n_theta_cal2ord(nTheta)
+            vrabs=fac*abs(vr(nTheta,nPhi))
+            en   =half*fac*(                                                &
+            &                     or2(nR)*vr(nTheta,nPhi)*vr(nTheta,nPhi) + &
+            &      O_sin_theta_E2(nTheta)*vt(nTheta,nPhi)*vt(nTheta,nPhi) + &
+            &      O_sin_theta_E2(nTheta)*vp(nTheta,nPhi)*vp(nTheta,nPhi) )
+
+            if ( nTh <= n_theta_max/2 ) then ! Northern Hemisphere
+               enAS(1)   =enAS(1) +phiNorm*gauss(nTheta)*en
+               vrabsAS(1)=vrabsAS(1) +phiNorm*gauss(nTheta)*vrabs
+            else
+               enAS(2)   =enAS(2) +phiNorm*gauss(nTheta)*en
+               vrabsAS(2)=vrabsAS(2) +phiNorm*gauss(nTheta)*vrabs
+            end if
+         end do
+      end do
+      !$omp end parallel do
+
+      if ( field == 'V' ) then
+         hemi_ekin_r(nR,:) =enAS(:)
+         hemi_vrabs_r(nR,:)=vrabsAS(:)
+      else if ( field == 'B' ) then
+         hemi_emag_r(nR,:) =enAS(:)
+         hemi_brabs_r(nR,:)=vrabsAS(:)
+      end if
+
+   end subroutine get_hemi
+!----------------------------------------------------------------------------------
+   subroutine get_helicity(vr,vt,vp,cvr,dvrdt,dvrdp,dvtdr,dvpdr,nR)
+      !
+      ! This subroutine calculates axisymmetric and non-axisymmetric contributions to
+      ! kinetic helicity and squared helicity.
+      !
+
+      !-- Input of variables
+      integer,  intent(in) :: nR
+      real(cp), intent(in) :: vr(:,:),vt(:,:),vp(:,:)
+      real(cp), intent(in) :: cvr(:,:),dvrdt(:,:),dvrdp(:,:)
+      real(cp), intent(in) :: dvtdr(:,:),dvpdr(:,:)
+
+      !-- Local variables:
+      integer :: nTheta,nPhi,nTh
+      real(cp) :: Helna,Hel,phiNorm
+      real(cp) :: HelAS(2), Hel2AS(2), HelnaAS(2), Helna2AS(2), HelEAAS
+      real(cp) :: vrna,vtna,vpna,cvrna,dvrdtna,dvrdpna,dvtdrna,dvpdrna
+      real(cp) :: vras(n_theta_max),vtas(n_theta_max),vpas(n_theta_max)
+      real(cp) :: cvras(n_theta_max),dvrdtas(n_theta_max),dvrdpas(n_theta_max)
+      real(cp) :: dvtdras(n_theta_max),dvpdras(n_theta_max)
+
+      !-- Remark: 2pi not used the normalization below
+      !-- this is why we have a 2pi factor after radial integration
+      !-- in the subroutine outHelicity()
+      phiNorm=one/real(n_phi_max,cp)
+      HelAS(:)   =0.0_cp
+      Hel2AS(:)  =0.0_cp
+      HelnaAS(:) =0.0_cp
+      Helna2AS(:)=0.0_cp
+      HelEAAS    =0.0_cp
+
+      vras(:)   =0.0_cp
+      cvras(:)  =0.0_cp
+      vtas(:)   =0.0_cp
+      vpas(:)   =0.0_cp
+      dvrdpas(:)=0.0_cp
+      dvpdras(:)=0.0_cp
+      dvtdras(:)=0.0_cp
+      dvrdtas(:)=0.0_cp
+      do nPhi=1,n_phi_max
+         vras(:)   =vras(:)   +   vr(1:n_theta_max,nPhi)
+         cvras(:)  =cvras(:)  +  cvr(1:n_theta_max,nPhi)
+         vtas(:)   =vtas(:)   +   vt(1:n_theta_max,nPhi)
+         vpas(:)   =vpas(:)   +   vp(1:n_theta_max,nPhi)
+         dvrdpas(:)=dvrdpas(:)+dvrdp(1:n_theta_max,nPhi)
+         dvpdras(:)=dvpdras(:)+dvpdr(1:n_theta_max,nPhi)
+         dvtdras(:)=dvtdras(:)+dvtdr(1:n_theta_max,nPhi)
+         dvrdtas(:)=dvrdtas(:)+dvrdt(1:n_theta_max,nPhi)
+      end do
+      vras(:)   =vras(:)   *phiNorm
+      cvras(:)  =cvras(:)  *phiNorm
+      vtas(:)   =vtas(:)   *phiNorm
+      vpas(:)   =vpas(:)   *phiNorm
+      dvrdpas(:)=dvrdpas(:)*phiNorm
+      dvpdras(:)=dvpdras(:)*phiNorm
+      dvtdras(:)=dvtdras(:)*phiNorm
+      dvrdtas(:)=dvrdtas(:)*phiNorm
+
+      !--- Helicity:
+      !$omp parallel do default(shared)                     &
+      !$omp& private(nTheta, nPhi, nTh, Hel, Helna)         &
+      !$omp& private(vrna, cvrna, vtna, vpna)               &
+      !$omp& private(dvrdpna, dvpdrna, dvtdrna, dvrdtna)    &
+      !$omp& reduction(+:HelAS,Hel2AS,HelnaAS,Helna2AS,HelEAAS)
+      do nPhi=1,n_phi_max
+         do nTheta=1,n_theta_max
+            nTh=n_theta_cal2ord(nTheta)
+            vrna   =   vr(nTheta,nPhi)-vras(nTheta)
+            cvrna  =  cvr(nTheta,nPhi)-cvras(nTheta)
+            vtna   =   vt(nTheta,nPhi)-vtas(nTheta)
+            vpna   =   vp(nTheta,nPhi)-vpas(nTheta)
+            dvrdpna=dvrdp(nTheta,nPhi)-dvrdpas(nTheta)
+            dvpdrna=dvpdr(nTheta,nPhi)-beta(nR)*vp(nTheta,nPhi) &
+            &       -dvpdras(nTheta)+beta(nR)*vpas(nTheta)
+            dvtdrna=dvtdr(nTheta,nPhi)-beta(nR)*vt(nTheta,nPhi) &
+            &       -dvtdras(nTheta)+beta(nR)*vtas(nTheta)
+            dvrdtna=dvrdt(nTheta,nPhi)-dvrdtas(nTheta)
+            Hel=or4(nR)*orho2(nR)*vr(nTheta,nPhi)*cvr(nTheta,nPhi) +  &
+            &             or2(nR)*orho2(nR)*O_sin_theta_E2(nTheta)* ( &
+            &                                       vt(nTheta,nPhi) * &
+            &                          ( or2(nR)*dvrdp(nTheta,nPhi) - &
+            &                                    dvpdr(nTheta,nPhi) + &
+            &                         beta(nR)*   vp(nTheta,nPhi) ) + &
+            &                                       vp(nTheta,nPhi) * &
+            &                          (         dvtdr(nTheta,nPhi) - &
+            &                           beta(nR)*   vt(nTheta,nPhi) - &
+            &                            or2(nR)*dvrdt(nTheta,nPhi) ) )
+            Helna=                      or4(nR)*orho2(nR)*vrna*cvrna + &
+            &              or2(nR)*orho2(nR)*O_sin_theta_E2(nTheta)* ( &
+            &                       vtna*( or2(nR)*dvrdpna-dvpdrna ) + &
+            &                       vpna*( dvtdrna-or2(nR)*dvrdtna ) )
+
+            if ( nTh <= n_theta_max/2 ) then ! Northern Hemisphere
+               HelAS(1)   =HelAS(1) +phiNorm*gauss(nTheta)*Hel
+               Hel2AS(1)  =Hel2AS(1)+phiNorm*gauss(nTheta)*Hel*Hel
+               HelnaAS(1) =HelnaAS(1) +phiNorm*gauss(nTheta)*Helna
+               Helna2AS(1)=Helna2AS(1)+phiNorm*gauss(nTheta)*Helna*Helna
+               HelEAAS    =HelEAAS +phiNorm*gauss(nTheta)*Hel
+            else
+               HelAS(2)   =HelAS(2) +phiNorm*gauss(nTheta)*Hel
+               Hel2AS(2)  =Hel2AS(2)+phiNorm*gauss(nTheta)*Hel*Hel
+               HelnaAS(2) =HelnaAS(2) +phiNorm*gauss(nTheta)*Helna
+               Helna2AS(2)=Helna2AS(2)+phiNorm*gauss(nTheta)*Helna*Helna
+               HelEAAS    =HelEAAS -phiNorm*gauss(nTheta)*Hel
+            end if
+         end do
+      end do
+      !$omp end parallel do
+
+      HelASr(nR,:)   =HelAS(:)
+      Hel2ASr(nR,:)  =Hel2AS(:)
+      HelnaASr(nR,:) =HelnaAS(:)
+      Helna2ASr(nR,:)=Helna2AS(:)
+      HelEAASr(nR)   =HelEAAS
+
+   end subroutine get_helicity
+!----------------------------------------------------------------------------------
+   subroutine get_ekin_solid_liquid(vr,vt,vp,phi,nR)
+      !
+      ! This subroutine computes the kinetic energy content in the solid
+      ! and in the liquid phase when phase field is employed.
+      !
+
+      !-- Input variables
+      integer,  intent(in) :: nR
+      real(cp), intent(in) :: vr(:,:),vt(:,:),vp(:,:),phi(:,:)
+
+      !-- Output variables:
+
+      !-- Local variables:
+      real(cp) :: phiNorm, ekin
+      real(cp) :: ekinS ! Kinetic energy in the solid phase
+      real(cp) :: ekinL ! Kinetic energy in the liquid phase
+      real(cp) :: volS  ! volume of the solid
+      integer :: nTheta,nPhi
+
+      phiNorm=two*pi/real(n_phi_max,cp)
+      ekinL=0.0_cp
+      ekinS=0.0_cp
+      volS =0.0_cp
+
+      !$omp parallel do default(shared) &
+      !$omp& private(nTheta,nPhi,ekin)  &
+      !$omp& reduction(+:ekinS,ekinL,volS)
+      do nPhi=1,n_phi_max
+         do nTheta=1,n_theta_max
+            ekin = half*orho1(nR)*(                                         &
+            &          or2(nR)*           vr(nTheta,nPhi)*vr(nTheta,nPhi) + &
+            &      O_sin_theta_E2(nTheta)*vt(nTheta,nPhi)*vt(nTheta,nPhi) + &
+            &      O_sin_theta_E2(nTheta)*vp(nTheta,nPhi)*vp(nTheta,nPhi) )
+
+            if ( phi(nTheta,nPhi) >= half ) then
+               ekinS=ekinS+phiNorm*gauss(nTheta)*ekin
+               volS =volS +phiNorm*gauss(nTheta)*r(nR)*r(nR)
+            else
+               ekinL=ekinL+phiNorm*gauss(nTheta)*ekin
+            end if
+         end do
+      end do
+      !$omp end parallel do
+
+      ekinSr(nR)=ekinS
+      ekinLr(nR)=ekinL
+      volSr(nR) =volS
+
+   end subroutine get_ekin_solid_liquid
+!----------------------------------------------------------------------------------
+   subroutine get_onset(time, w, dt, l_log, nLogs)
+      !
+      ! This subroutine is used to estimate the growth rate and the drifting
+      ! frequencies of a series of m modes for both equatorially-symmetric
+      ! and equatorially-antisymmetric modes. This is used to compute the critical
+      ! Rayleigh number. This makes uses of the radial integration of the poloidal
+      ! potential at different (l,m) tuples.
+      !
+
+      real(cp),    intent(in) :: time  ! Time
+      real(cp),    intent(in) :: dt    ! Timestep size
+      logical,     intent(in) :: l_log ! Do we need to store outputs
+      integer,     intent(in) :: nLogs ! Do not write at the first time step
+      complex(cp), intent(in) :: w(llm:ulm, n_r_max) ! Poloidal potential
+
+      !-- Local variables
+      character(len=3) :: ad
+      complex(cp) :: coeff, tau(llm:ulm)
+      real(cp) :: tmpr(n_r_max), tmpi(n_r_max)
+      real(cp) :: facR, facI
+      complex(cp), allocatable :: tau_glob(:)
+      integer :: lm, l, m
+
+      do lm=llm,ulm
+         tmpr(:) = real(w(lm,:)) * r * r
+         tmpi(:) = aimag(w(lm,:)) * r * r
+         facR = rInt_R(tmpr, r, rscheme_oc)
+         facI = rInt_R(tmpi, r, rscheme_oc)
+         coeff = cmplx(facR, facI, kind=cp)
+         if ( abs(coeff) > 0.0_cp .and. abs(coeff_old(lm)) > 0.0_cp ) then
+            tau(lm) = cmplx((abs(coeff) - abs(coeff_old(lm)))/abs(coeff), &
+            &               aimag((coeff - coeff_old(lm))/coeff), kind=cp)/dt
+         else
+            tau(lm) = zero
+         end if
+         coeff_old(lm) = coeff
+      end do
+
+      if ( l_log ) then
+         if ( rank == 0 ) then
+            allocate( tau_glob(lm_max) )
+         else
+            allocate( tau_glob(1) )
+         end if
+         call gather_from_lo_to_rank0(tau, tau_glob)
+      end if
+
+      if ( rank == 0 .and. l_log .and. nLogs > 1 ) then
+         if ( l_save_out ) then
+            open(newunit=n_growth_sym_file, file=sym_file, status='unknown', &
+            &    position='append')
+            open(newunit=n_growth_asym_file, file=asym_file, status='unknown',   &
+            &    position='append')
+            open(newunit=n_drift_sym_file, file=drift_sym_file, status='unknown',   &
+            &    position='append')
+            open(newunit=n_drift_asym_file, file=drift_asym_file, status='unknown', &
+            &    position='append')
+         end if
+         ad='no'
+         do m=m_min,m_max,minc
+            if ( m == m_max .and. (.not. l_save_out)) ad='yes'
+            l =max(m,1)
+            lm=lm2(l,m)
+            if ( m == m_min ) then
+               write(n_growth_sym_file, '(es16.8,es14.6)', advance=ad) &
+               &     time, real(tau_glob(lm))
+               write(n_drift_sym_file, '(es16.8,es14.6)', advance=ad) &
+               &     time, aimag(tau_glob(lm))
+            else
+               write(n_growth_sym_file, '(es14.6)', advance=ad) real(tau_glob(lm))
+               write(n_drift_sym_file, '(es14.6)', advance=ad) aimag(tau_glob(lm))
+            end if
+            lm=lm2(l+1,m)
+            if ( m == m_min ) then
+               write(n_growth_asym_file, '(es16.8,es14.6)', advance=ad) &
+               &     time, real(tau_glob(lm))
+               write(n_drift_asym_file, '(es16.8,es14.6)', advance=ad) &
+               &     time, aimag(tau_glob(lm))
+            else
+               write(n_growth_asym_file, '(es14.6)', advance=ad) real(tau_glob(lm))
+               write(n_drift_asym_file, '(es14.6)', advance=ad) aimag(tau_glob(lm))
+            end if
+
+         end do
+         if ( l_save_out ) then
+            close(n_growth_sym_file)
+            close(n_growth_asym_file)
+            close(n_drift_sym_file)
+            close(n_drift_asym_file)
+         end if
+      end if
+
+      if ( l_log ) deallocate(tau_glob)
+
+   end subroutine get_onset
+!----------------------------------------------------------------------------------
 end module outMisc_mod

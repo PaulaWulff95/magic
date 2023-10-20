@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import matplotlib.pyplot as plt
 import numpy as np
-from magic import scanDir, MagicSetup, Movie, matder, chebgrid, rderavg, AvgField
+from magic import scanDir, MagicSetup, Movie, chebgrid, rderavg, AvgField
 import os, pickle
 from scipy.integrate import simps, trapz
 
@@ -112,21 +112,22 @@ class ThetaHeat(MagicSetup):
                 self.fluxstd = rderavg(self.tempstd, m.radius, exclude=False)
 
             # Pickle saving
-            f = open(pickleName, 'wb')
-            pickle.dump([self.colat, self.tempmean, self.tempstd,\
-                         self.fluxmean, self.fluxstd], f)
-            f.close()
+            try:
+                with open(pickleName, 'wb') as f:
+                    pickle.dump([self.colat, self.tempmean, self.tempstd,
+                                 self.fluxmean, self.fluxstd], f)
+            except PermissionError:
+                print('No write access in the current directory')
         else:
-            f = open(pickleName, 'rb')
-            dat = pickle.load(f)
-            if len(dat) == 5:
-                self.colat, self.tempmean, self.tempstd, \
-                            self.fluxmean, self.fluxstd = dat
-            else:
-                self.colat, self.tempmean, self.fluxmean = dat
-                self.fluxstd = np.zeros_like(self.fluxmean)
-                self.tempstd = np.zeros_like(self.fluxmean)
-            f.close()
+            with open(pickleName, 'rb') as f:
+                dat = pickle.load(f)
+                if len(dat) == 5:
+                    self.colat, self.tempmean, self.tempstd, \
+                                self.fluxmean, self.fluxstd = dat
+                else:
+                    self.colat, self.tempmean, self.fluxmean = dat
+                    self.fluxstd = np.zeros_like(self.fluxmean)
+                    self.tempstd = np.zeros_like(self.fluxmean)
 
         self.ri = self.radratio/(1.-self.radratio)
         self.ro = 1./(1.-self.radratio)
@@ -149,8 +150,20 @@ class ThetaHeat(MagicSetup):
             d1 = matder(self.nr-1, self.ro, self.ri)
 
         # Conducting temperature profile (Boussinesq only!)
-        self.tcond = self.ri*self.ro/self.radius-self.ri+self.temprmmean[0]
-        self.fcond = -self.ri*self.ro/self.radius**2
+        if self.ktops == 1 and self.kbots == 1:
+            self.tcond = self.ri*self.ro/self.radius-self.ri+self.temprmmean[0]
+            self.fcond = -self.ri*self.ro/self.radius**2
+        elif self.ktops == 1 and self.kbots != 1:
+            qbot = -1.
+            ttop = self.temprmmean[0]
+            self.fcond = -self.ri**2 / self.radius**2
+            self.tcond = self.ri**2/self.radius - self.ri**2/self.ro + ttop
+        else:
+            if os.path.exists('pscond.dat'):
+                dat = np.loadtxt('pscond.dat')
+                self.tcond = dat[:, 1]
+                self.fcond = rderavg(self.tcond, self.radius)
+
         self.nusstopmean = self.fluxmean[:, 0] / self.fcond[0]
         self.nussbotmean = self.fluxmean[:, -1] / self.fcond[-1]
         self.nusstopstd = self.fluxstd[:, 0] / self.fcond[0]
@@ -256,7 +269,6 @@ class ThetaHeat(MagicSetup):
         else:
             dtempPol = np.diff(self.tempPolmean) / np.diff(self.radius)
         self.betaPol = dtempPol[len(dtempPol)//2]
-
 
         # Inside and outside TC
         angleTC = np.arcsin(self.ri/self.ro)

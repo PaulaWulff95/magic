@@ -15,7 +15,7 @@ module LMLoop_mod
    use blocking, only: lo_map, llm, ulm, llmMag, ulmMag, st_map
    use logic, only: l_mag, l_conv, l_heat, l_single_matrix, l_double_curl, &
        &            l_chemical_conv, l_cond_ic, l_update_s, l_z10mat,      &
-       &            l_parallel_solve, l_mag_par_solve, l_phase_field
+       &            l_parallel_solve, l_mag_par_solve, l_phase_field, l_onset
    use time_array, only: type_tarray, type_tscalar
    use time_schemes, only: type_tscheme
    use timing, only: timer_type
@@ -63,7 +63,11 @@ contains
 
       if ( l_chemical_conv ) call initialize_updateXi()
 
-      if ( l_phase_field ) call initialize_updatePhi()
+      if ( l_phase_field ) then
+         call initialize_updatePhi()
+      else
+         allocate( phi_ghost(1,1) ) ! For debugging only
+      end if
 
       call initialize_updateZ()
       if ( l_mag ) call initialize_updateB()
@@ -122,7 +126,7 @@ contains
       if ( l_conv ) then
          call prepareZ_FD(0.0_cp, tscheme, dummy, omega_ma, omega_ic, dum_scal, &
               &           dum_scal)
-         call prepareW_FD(tscheme, dummy, .false.)
+         call prepareW_FD(0.0_cp, tscheme, dummy, .false.)
       end if
       if ( l_mag_par_solve ) call prepareB_FD(0.0_cp, tscheme, dummy, dummy)
 
@@ -155,7 +159,11 @@ contains
       call finalize_updateZ()
 
       if ( l_chemical_conv ) call finalize_updateXi()
-      if ( l_phase_field ) call finalize_updatePhi()
+      if ( l_phase_field ) then
+         call finalize_updatePhi()
+      else
+         deallocate( phi_ghost )
+      end if
       if ( l_mag ) call finalize_updateB()
       if ( l_parallel_solve ) deallocate(array_of_requests)
 
@@ -234,16 +242,18 @@ contains
                z10(:)=real(z_LMloc(lo_map%lm2(1,0),:))
             end if
 #ifdef WITH_MPI
-            call MPI_Bcast(z10,n_r_max,MPI_DEF_REAL,rank_with_l1m0, &
-                 &         MPI_COMM_WORLD,ierr)
+            if ( rank_with_l1m0 >= 0 ) then ! This is -1 if m_min > 0
+               call MPI_Bcast(z10,n_r_max,MPI_DEF_REAL,rank_with_l1m0, &
+                    &         MPI_COMM_WORLD,ierr)
+            end if
 #endif
-            call updateWPS( w_LMloc, dw_LMloc, ddw_LMloc, z10, dwdt,    &
-                 &          p_LMloc, dp_LMloc, dpdt, s_LMloc, ds_LMloc, &
+            call updateWPS( time, w_LMloc, dw_LMloc, ddw_LMloc, z10, dwdt, &
+                 &          p_LMloc, dp_LMloc, dpdt, s_LMloc, ds_LMloc,    &
                  &          dsdt, tscheme, lRmsNext )
          else
             PERFON('up_WP')
-            call updateWP( s_LMloc, xi_LMLoc, w_LMloc, dw_LMloc, ddw_LMloc, &
-                 &         dwdt, p_LMloc, dp_LMloc, dpdt, tscheme,          &
+            call updateWP( time, s_LMloc, xi_LMLoc, w_LMloc, dw_LMloc,       &
+                 &         ddw_LMloc,dwdt, p_LMloc, dp_LMloc, dpdt, tscheme, &
                  &         lRmsNext, lPressNext )
             PERFOFF
          end if
@@ -262,8 +272,8 @@ contains
    end subroutine LMLoop
 !--------------------------------------------------------------------------------
    subroutine LMLoop_Rdist(time,timeNext,tscheme,lMat,lRmsNext,lPressNext,    &
-              &            dsdt,dwdt,dzdt,dpdt,dxidt,dphidt,dbdt,djdt,dbdt_ic,&
-              &            djdt_ic,domega_ma_dt,domega_ic_dt,                 &
+              &            lP00Next,dsdt,dwdt,dzdt,dpdt,dxidt,dphidt,dbdt,    &
+              &            djdt,dbdt_ic,djdt_ic,domega_ma_dt,domega_ic_dt,    &
               &            lorentz_torque_ma_dt,lorentz_torque_ic_dt,         &
               &            b_nl_cmb,aj_nl_cmb,aj_nl_icb)
       !
@@ -279,6 +289,7 @@ contains
       logical,             intent(in) :: lMat
       logical,             intent(in) :: lRmsNext
       logical,             intent(in) :: lPressNext
+      logical,             intent(in) :: lP00Next ! Do wee need p00 pressure on next log
       complex(cp),         intent(in) :: b_nl_cmb(lm_max)   ! nonlinear bc for b at CMB
       complex(cp),         intent(in)  :: aj_nl_cmb(lm_max)  ! nonlinear bc for aj at CMB
       complex(cp),         intent(in)  :: aj_nl_icb(lm_max)  ! nonlinear bc for dr aj at ICB
@@ -287,6 +298,11 @@ contains
       type(type_tarray),  intent(inout) :: dbdt, djdt, dbdt_ic, djdt_ic
       type(type_tscalar), intent(inout) :: domega_ic_dt, domega_ma_dt
       type(type_tscalar), intent(inout) :: lorentz_torque_ic_dt, lorentz_torque_ma_dt
+
+      !-- Local variable
+      logical :: lPress
+
+      lPress = lPressNext .or. lP00Next
 
       if ( lMat ) then ! update matrices:
          lZ10mat=.false.
@@ -315,8 +331,8 @@ contains
          call prepareZ_FD(time, tscheme, dzdt, omega_ma, omega_ic, domega_ma_dt, &
               &           domega_ic_dt)
          if ( l_z10mat ) call z10Mat_FD%solver_single(z10_ghost, nRstart, nRstop)
-         call prepareW_FD(tscheme, dwdt, lPressNext)
-         if ( lPressNext ) call p0Mat_FD%solver_single(p0_ghost, nRstart, nRstop)
+         call prepareW_FD(time, tscheme, dwdt, lPress)
+         if ( lPress ) call p0Mat_FD%solver_single(p0_ghost, nRstart, nRstop)
       end if
       if ( l_mag_par_solve ) call prepareB_FD(time, tscheme, dbdt, djdt)
 
@@ -336,7 +352,7 @@ contains
       if ( l_chemical_conv ) call fill_ghosts_Xi(xi_ghost)
       if ( l_conv ) then
          call fill_ghosts_Z(z_ghost)
-         call fill_ghosts_W(w_ghost, p0_ghost, lPressNext)
+         call fill_ghosts_W(w_ghost, p0_ghost, lPress)
       end if
       if ( l_mag_par_solve ) call fill_ghosts_B(b_ghost, aj_ghost)
 
@@ -348,7 +364,8 @@ contains
            &          domega_ma_dt, domega_ic_dt, lorentz_torque_ma_dt,          &
            &          lorentz_torque_ic_dt, tscheme, lRmsNext)
       call updateW_FD(w_Rloc, dw_Rloc, ddw_Rloc, dwdt, p_Rloc, dp_Rloc, dpdt, tscheme, &
-           &          lRmsNext, lPressNext)
+           &          lRmsNext, lPressNext, lP00Next)
+
       if ( l_mag_par_solve ) then
          call updateB_FD(b_Rloc, db_Rloc, ddb_Rloc, aj_Rloc, dj_Rloc, ddj_Rloc, dbdt, &
               &          djdt, tscheme, lRmsNext)
@@ -397,7 +414,7 @@ contains
       type(type_tscalar),  intent(inout) :: lorentz_torque_ic_dt, lorentz_torque_ma_dt
 
       if ( l_chemical_conv ) then
-         call finish_exp_comp(dVXir_LMloc, dxidt%expl(:,:,tscheme%istage))
+         call finish_exp_comp(w, dVXir_LMloc, dxidt%expl(:,:,tscheme%istage))
       end if
 
       if ( l_single_matrix ) then
@@ -411,11 +428,13 @@ contains
          end if
       end if
 
-      call finish_exp_tor(lorentz_torque_ma, lorentz_torque_ic,     &
-           &              domega_ma_dt%expl(tscheme%istage),        &
-           &              domega_ic_dt%expl(tscheme%istage),        &
-           &              lorentz_torque_ma_dt%expl(tscheme%istage),&
-           &              lorentz_torque_ic_dt%expl(tscheme%istage))
+      if ( .not. l_onset ) then
+         call finish_exp_tor(lorentz_torque_ma, lorentz_torque_ic,     &
+              &              domega_ma_dt%expl(tscheme%istage),        &
+              &              domega_ic_dt%expl(tscheme%istage),        &
+              &              lorentz_torque_ma_dt%expl(tscheme%istage),&
+              &              lorentz_torque_ic_dt%expl(tscheme%istage))
+      end if
 
       if ( l_mag ) then
          call finish_exp_mag(dVxBh_LMloc, djdt%expl(:,:,tscheme%istage))
@@ -464,7 +483,7 @@ contains
       type(type_tscalar),  intent(inout) :: domega_ic_dt, domega_ma_dt
       type(type_tscalar),  intent(inout) :: lorentz_torque_ic_dt, lorentz_torque_ma_dt
 
-      if ( l_chemical_conv ) call finish_exp_comp_Rdist(dVXir_Rloc, dxidt_Rloc)
+      if ( l_chemical_conv ) call finish_exp_comp_Rdist(w, dVXir_Rloc, dxidt_Rloc)
 
       if ( l_single_matrix ) then
          call finish_exp_smat_Rdist(dVSr_Rloc, dsdt_Rloc)
@@ -473,11 +492,13 @@ contains
          if ( l_double_curl ) call finish_exp_pol_Rdist(dVxVh_Rloc, dwdt_Rloc)
       end if
 
-      call finish_exp_tor(lorentz_torque_ma, lorentz_torque_ic,     &
-           &              domega_ma_dt%expl(tscheme%istage),        &
-           &              domega_ic_dt%expl(tscheme%istage),        &
-           &              lorentz_torque_ma_dt%expl(tscheme%istage),&
-           &              lorentz_torque_ic_dt%expl(tscheme%istage))
+      if ( .not. l_onset ) then
+         call finish_exp_tor(lorentz_torque_ma, lorentz_torque_ic,     &
+              &              domega_ma_dt%expl(tscheme%istage),        &
+              &              domega_ic_dt%expl(tscheme%istage),        &
+              &              lorentz_torque_ma_dt%expl(tscheme%istage),&
+              &              lorentz_torque_ic_dt%expl(tscheme%istage))
+      end if
 
       if ( l_mag ) call finish_exp_mag_Rdist(dVxBh_Rloc, djdt_Rloc)
 
@@ -567,7 +588,7 @@ contains
 
       if ( l_phase_field )  call assemble_phase_Rloc(phi_Rloc, dphidt, tscheme)
       if ( l_chemical_conv )  call assemble_comp_Rloc(xi_Rloc, dxidt, tscheme)
-      if ( l_heat )  call assemble_entropy_Rloc(s_Rloc, ds_Rloc, dsdt, phi_ghost, tscheme)
+      if ( l_heat )  call assemble_entropy_Rloc(s_Rloc, ds_Rloc, dsdt, phi_Rloc, tscheme)
 
       call assemble_pol_Rloc(block_sze, nblocks, w_Rloc, dw_Rloc, ddw_Rloc, p_Rloc, &
            &                 dp_Rloc, dwdt, dpdt%expl(:,:,1), tscheme, lPressNext,  &
@@ -605,7 +626,7 @@ contains
 #ifdef WITH_MPI
       array_of_requests(:)=MPI_REQUEST_NULL
 #endif
-      !$omp parallel default(shared) private(tag, req, start_lm, stop_lm)
+      !$omp parallel default(shared) private(tag, req, start_lm, stop_lm, nlm_block, lms_block)
       tag = 0
       req=1
       do lms_block=1,lm_max,block_sze
@@ -669,7 +690,7 @@ contains
       array_of_requests(:)=MPI_REQUEST_NULL
 #endif
 
-      !$omp parallel default(shared) private(tag, req, start_lm, stop_lm)
+      !$omp parallel default(shared) private(tag, req, start_lm, stop_lm, nlm_block, lms_block)
       tag = 0
       req=1
 

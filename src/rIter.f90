@@ -12,7 +12,7 @@ module rIter_mod
    use num_param, only: phy2lm_counter, lm2phy_counter, nl_counter, &
        &                td_counter
    use parallel_mod
-   use truncation, only: lmP_max, n_phi_max, lm_max, lm_maxMag
+   use truncation, only: n_phi_max, lm_max, lm_maxMag
    use logic, only: l_mag, l_conv, l_mag_kin, l_heat, l_ht, l_anel,  &
        &            l_mag_LF, l_conv_nl, l_mag_nl, l_b_nl_cmb,       &
        &            l_b_nl_icb, l_rot_ic, l_cond_ic, l_rot_ma,       &
@@ -20,7 +20,7 @@ module rIter_mod
        &            l_TO, l_chemical_conv, l_probe, l_full_sphere,   &
        &            l_precession, l_centrifuge, l_adv_curl,          &
        &            l_double_curl, l_parallel_solve, l_single_matrix,&
-       &            l_temperature_diff, l_RMS, l_phase_field
+       &            l_temperature_diff, l_RMS, l_phase_field, l_onset
    use radial_data, only: n_r_cmb, n_r_icb, nRstart, nRstop, nRstartMag, &
        &                  nRstopMag
    use radial_functions, only: or2, orho1, l_R
@@ -39,8 +39,10 @@ module rIter_mod
    use out_movie, only: store_movie_frame
    use outRot, only: get_lorentz_torque
    use courant_mod, only: courant
-   use nonlinear_bcs, only: get_br_v_bcs, v_rigid_boundary
-   use nl_special_calc
+   use nonlinear_bcs, only: get_br_v_bcs, v_rigid_boundary, v_center_sphere
+   use power, only: get_visc_heat
+   use outMisc_mod, only: get_ekin_solid_liquid, get_hemi, get_helicity
+   use outPar_mod, only: get_fluxes, get_nlBlayers, get_perpPar
    use geos, only: calcGeos
    use sht
    use fields, only: s_Rloc, ds_Rloc, z_Rloc, dz_Rloc, p_Rloc,    &
@@ -48,7 +50,8 @@ module rIter_mod
        &             w_Rloc, dw_Rloc, ddw_Rloc, xi_Rloc, omega_ic,&
        &             omega_ma, dp_Rloc, phi_Rloc
    use time_schemes, only: type_tscheme
-   use physical_parameters, only: ktops, kbots, n_r_LCR, ktopv, kbotv
+   use physical_parameters, only: ktops, kbots, n_r_LCR, ktopv, kbotv,&
+       &                          ellip_fac_cmb, ellip_fac_icb
    use rIteration, only: rIter_t
    use RMS, only: get_nl_RMS, transform_to_lm_RMS, compute_lm_forces, &
        &          transform_to_grid_RMS
@@ -80,7 +83,7 @@ contains
       call this%gsa%initialize()
       if ( l_TO ) call this%TO_arrays%initialize()
       call this%dtB_arrays%initialize()
-      call this%nl_lm%initialize(lmP_max)
+      call this%nl_lm%initialize(lm_max)
 
    end subroutine initialize
 !------------------------------------------------------------------------------
@@ -95,17 +98,14 @@ contains
 
    end subroutine finalize
 !------------------------------------------------------------------------------
-   subroutine radialLoop(this,l_graph,l_frame,time,timeStage,tscheme,dtLast, &
-              &          lTOCalc,lTONext,lTONext2,lHelCalc,lPowerCalc,       &
-              &          lRmsCalc,lPressCalc,lPressNext,lViscBcCalc,         &
-              &          lFluxProfCalc,lPerpParCalc,lGeosCalc,l_probe_out,   &
-              &          dsdt,dwdt,dzdt,dpdt,dxidt,dphidt,dbdt,djdt,dVxVhLM, &
-              &          dVxBhLM,dVSrLM,dVXirLM,lorentz_torque_ic,           &
-              &          lorentz_torque_ma,br_vt_lm_cmb,br_vp_lm_cmb,        &
-              &          br_vt_lm_icb,br_vp_lm_icb,HelAS,Hel2AS,HelnaAS,     &
-              &          Helna2AS,HelEAAS,viscAS,uhAS,duhAS,gradsAS,fconvAS, &
-              &          fkinAS,fviscAS,fpoynAS,fresAS,EperpAS,EparAS,       &
-              &          EperpaxiAS,EparaxiAS,ekinS,ekinL,volS,dtrkc,dthkc)
+   subroutine radialLoop(this,l_graph,l_frame,time,timeStage,tscheme,dtLast,  &
+              &          lTOCalc,lTONext,lTONext2,lHelCalc,lPowerCalc,        &
+              &          lRmsCalc,lPressCalc,lPressNext,lViscBcCalc,          &
+              &          lFluxProfCalc,lPerpParCalc,lGeosCalc,lHemiCalc,      &
+              &          l_probe_out,dsdt,dwdt,dzdt,dpdt,dxidt,dphidt,dbdt,   &
+              &          djdt,dVxVhLM,dVxBhLM,dVSrLM,dVXirLM,                 &
+              &          lorentz_torque_ic,lorentz_torque_ma,br_vt_lm_cmb,    &
+              &          br_vp_lm_cmb,br_vt_lm_icb,br_vp_lm_icb,dtrkc,dthkc)
       !
       ! This subroutine handles the main loop over the radial levels. It calls
       ! the SH transforms, computes the nonlinear terms on the grid and bring back
@@ -118,7 +118,7 @@ contains
       !--- Input of variables:
       logical,             intent(in) :: l_graph,l_frame
       logical,             intent(in) :: lTOcalc,lTONext,lTONext2,lHelCalc
-      logical,             intent(in) :: lPowerCalc
+      logical,             intent(in) :: lPowerCalc,lHemiCalc
       logical,             intent(in) :: lViscBcCalc,lFluxProfCalc,lPerpParCalc
       logical,             intent(in) :: lRmsCalc,lGeosCalc
       logical,             intent(in) :: l_probe_out
@@ -140,27 +140,6 @@ contains
       complex(cp), intent(out) :: dVXirLM(lm_max,nRstart:nRstop)
       complex(cp), intent(out) :: dVxVhLM(lm_max,nRstart:nRstop)
       complex(cp), intent(out) :: dVxBhLM(lm_maxMag,nRstartMag:nRstopMag)
-      real(cp),    intent(inout) :: HelAS(2,nRstart:nRstop)
-      real(cp),    intent(inout) :: Hel2AS(2,nRstart:nRstop)
-      real(cp),    intent(inout) :: HelnaAS(2,nRstart:nRstop)
-      real(cp),    intent(inout) :: Helna2AS(2,nRstart:nRstop)
-      real(cp),    intent(inout) :: HelEAAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: uhAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: duhAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: viscAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: gradsAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: fkinAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: fconvAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: fviscAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: fresAS(nRstartMag:nRstopMag)
-      real(cp),    intent(inout) :: fpoynAS(nRstartMag:nRstopMag)
-      real(cp),    intent(inout) :: EperpAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: EparAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: EperpaxiAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: EparaxiAS(nRstart:nRstop)
-      real(cp),    intent(inout) :: ekinS(nRstart:nRstop)
-      real(cp),    intent(inout) :: ekinL(nRstart:nRstop)
-      real(cp),    intent(inout) :: volS(nRstart:nRstop)
 
       !---- Output of nonlinear products for nonlinear
       !     magnetic boundary conditions (needed in s_updateB.f):
@@ -195,13 +174,9 @@ contains
       !------ Set nonlinear terms that are possibly needed at the boundaries.
       !       They may be overwritten by get_td later.
       if ( rank == 0 ) then
-         if ( l_heat ) dVSrLM(:,n_r_cmb) =zero
-         if ( l_chemical_conv ) dVXirLM(:,n_r_cmb)=zero
          if ( l_mag ) dVxBhLM(:,n_r_cmb)=zero
          if ( l_double_curl ) dVxVhLM(:,n_r_cmb)=zero
       else if (rank == n_procs-1) then
-         if ( l_heat ) dVSrLM(:,n_r_icb) =zero
-         if ( l_chemical_conv ) dVXirLM(:,n_r_icb)=zero
          if ( l_mag ) dVxBhLM(:,n_r_icb)=zero
          if ( l_double_curl ) dVxVhLM(:,n_r_icb)=zero
       end if
@@ -225,12 +200,12 @@ contains
             nBc = ktopv
             lDeriv= lTOCalc .or. lHelCalc .or. l_frame .or. lPerpParCalc   &
             &       .or. lViscBcCalc .or. lFluxProfCalc .or. lRmsCalc .or. &
-            &       lPowerCalc .or. lGeosCalc
+            &       lPowerCalc .or. lGeosCalc .or. lHemiCalc
          else if ( nR == n_r_icb ) then
             nBc = kbotv
             lDeriv= lTOCalc .or. lHelCalc .or. l_frame  .or. lPerpParCalc  &
             &       .or. lViscBcCalc .or. lFluxProfCalc .or. lRmsCalc .or. &
-            &       lPowerCalc .or. lGeosCalc
+            &       lPowerCalc .or. lGeosCalc .or. lHemiCalc
          end if
 
          if ( l_parallel_solve .or. (l_single_matrix .and. l_temperature_diff) ) then
@@ -238,8 +213,10 @@ contains
             ! equation
             lDeriv=.true.
             nBc=0
-            !l_Bound=.false.
+            l_Bound=.false.
          end if
+
+         if ( lRmsCalc ) nBc=0 ! One also needs to compute the boundaries in that case
 
          dtrkc(nR)=1e10_cp
          dthkc(nR)=1e10_cp
@@ -255,15 +232,17 @@ contains
 
          call this%nl_lm%set_zero()
 
-         call lm2phy_counter%start_count()
-         call this%transform_to_grid_space(nR, nBc, lViscBcCalc, lRmsCalc,       &
-              &                            lPressCalc, lTOCalc, lPowerCalc,      &
-              &                            lFluxProfCalc, lPerpParCalc, lHelCalc,&
-              &                            lGeosCalc, l_frame, lDeriv)
-         call lm2phy_counter%stop_count(l_increment=.false.)
+         if ( .not. l_onset ) then
+            call lm2phy_counter%start_count()
+            call this%transform_to_grid_space(nR, nBc, lViscBcCalc, lRmsCalc,       &
+                 &                            lPressCalc, lTOCalc, lPowerCalc,      &
+                 &                            lFluxProfCalc, lPerpParCalc, lHelCalc,&
+                 &                            lGeosCalc, lHemiCalc, l_frame, lDeriv)
+            call lm2phy_counter%stop_count(l_increment=.false.)
+         end if
 
          !--------- Calculation of nonlinear products in grid space:
-         if ( (.not. l_bound) .or. lMagNlBc .or. lRmsCalc ) then
+         if ( (.not. l_onset ) .and. ((.not. l_bound) .or. lMagNlBc .or. lRmsCalc) ) then
 
             call nl_counter%start_count()
             call this%gsa%get_nl(timeStage, nR, nBc, lRmsCalc)
@@ -279,7 +258,8 @@ contains
             end if
 
             call phy2lm_counter%start_count()
-            call this%transform_to_lm_space(nR, lRmsCalc)
+            call this%transform_to_lm_space(nR, lRmsCalc, dVSrLM(:,nR), dVXirLM(:,nR), &
+                 &                         dphidt(:,nR))
             call phy2lm_counter%stop_count(l_increment=.false.)
          else if ( l_mag ) then
             this%nl_lm%VxBtLM(:)=zero
@@ -321,7 +301,7 @@ contains
          end if
 
          !--------- Calculate courant condition parameters:
-         if ( .not. l_full_sphere .or. nR /= n_r_icb ) then
+         if ( (.not. l_full_sphere .or. nR /= n_r_icb) .and. (.not. l_onset) ) then
             call courant(nR, dtrkc(nR), dthkc(nR), this%gsa%vrc,              &
                  &       this%gsa%vtc,this%gsa%vpc,this%gsa%brc,this%gsa%btc, &
                  &       this%gsa%bpc, tscheme%courfac, tscheme%alffac)
@@ -351,9 +331,13 @@ contains
          if ( lHelCalc ) then
             call get_helicity(this%gsa%vrc,this%gsa%vtc,this%gsa%vpc,         &
                  &            this%gsa%cvrc,this%gsa%dvrdtc,this%gsa%dvrdpc,  &
-                 &            this%gsa%dvtdrc,this%gsa%dvpdrc,HelAS(:,nR),    &
-                 &            Hel2AS(:,nR),HelnaAS(:,nR),Helna2AS(:,nR),      &
-                 &            HelEAAS(nR),nR )
+                 &            this%gsa%dvtdrc,this%gsa%dvpdrc,nR)
+         end if
+
+         !-- North/South hemisphere differences
+         if ( lHemiCalc ) then
+            call get_hemi(this%gsa%vrc,this%gsa%vtc,this%gsa%vpc,nR,'V')
+            if ( l_mag ) call get_hemi(this%gsa%brc,this%gsa%btc,this%gsa%bpc,nR,'B')
          end if
 
          !-- Viscous heating:
@@ -361,16 +345,14 @@ contains
             call get_visc_heat(this%gsa%vrc,this%gsa%vtc,this%gsa%vpc,          &
                  &             this%gsa%cvrc,this%gsa%dvrdrc,this%gsa%dvrdtc,   &
                  &             this%gsa%dvrdpc,this%gsa%dvtdrc,this%gsa%dvtdpc, &
-                 &             this%gsa%dvpdrc,this%gsa%dvpdpc,viscAS(nR),      &
-                 &             nR)
+                 &             this%gsa%dvpdrc,this%gsa%dvpdpc,nR)
          end if
 
          !-- horizontal velocity :
          if ( lViscBcCalc ) then
             call get_nlBLayers(this%gsa%vtc,this%gsa%vpc,this%gsa%dvtdrc,    &
                  &             this%gsa%dvpdrc,this%gsa%drSc,this%gsa%dsdtc, &
-                 &             this%gsa%dsdpc,uhAS(nR),duhAS(nR),gradsAS(nR),&
-                 &             nR )
+                 &             this%gsa%dsdpc,nR )
          end if
 
          !-- Radial flux profiles
@@ -379,21 +361,18 @@ contains
                  &          this%gsa%dvrdrc,this%gsa%dvtdrc,this%gsa%dvpdrc,   &
                  &          this%gsa%dvrdtc,this%gsa%dvrdpc,this%gsa%sc,       &
                  &          this%gsa%pc,this%gsa%brc,this%gsa%btc,this%gsa%bpc,&
-                 &          this%gsa%cbtc,this%gsa%cbpc,fconvAS(nR),fkinAS(nR),&
-                 &          fviscAS(nR),fpoynAS(nR),fresAS(nR),nR )
+                 &          this%gsa%cbtc,this%gsa%cbpc,nR)
          end if
 
          !-- Kinetic energy in the solid and liquid phases
          if ( l_phase_field ) then
             call get_ekin_solid_liquid(this%gsa%vrc,this%gsa%vtc,this%gsa%vpc, &
-                 &                     this%gsa%phic,ekinS(nR),ekinL(nR),      &
-                 &                     volS(nR),nR)
+                 &                     this%gsa%phic,nR)
          end if
 
          !-- Kinetic energy parallel and perpendicular to rotation axis
          if ( lPerpParCalc ) then
-            call get_perpPar(this%gsa%vrc,this%gsa%vtc,this%gsa%vpc,EperpAS(nR), &
-                 &           EparAS(nR),EperpaxiAS(nR),EparaxiAS(nR),nR)
+            call get_perpPar(this%gsa%vrc,this%gsa%vtc,this%gsa%vpc,nR)
          end if
 
          !-- Geostrophic/non-geostrophic flow components
@@ -416,15 +395,14 @@ contains
          !--------- Calculation of magnetic field production and advection terms
          !          for graphic output:
          if ( l_dtB ) then
-            call get_dtBLM(nR,this%gsa%vrc,this%gsa%vtc,this%gsa%vpc,            &
-                 &         this%gsa%brc,this%gsa%btc,this%gsa%bpc,               &
-                 &         this%dtB_arrays%BtVrLM,                               &
-                 &         this%dtB_arrays%BpVrLM,this%dtB_arrays%BrVtLM,        &
-                 &         this%dtB_arrays%BrVpLM,this%dtB_arrays%BtVpLM,        &
-                 &         this%dtB_arrays%BpVtLM,this%dtB_arrays%BrVZLM,        &
-                 &         this%dtB_arrays%BtVZLM,this%dtB_arrays%BtVpCotLM,     &
-                 &         this%dtB_arrays%BpVtCotLM,this%dtB_arrays%BtVZcotLM,  &
-                 &         this%dtB_arrays%BtVpSn2LM,this%dtB_arrays%BpVtSn2LM,  &
+            call get_dtBLM(nR,this%gsa%vrc,this%gsa%vtc,this%gsa%vpc,       &
+                 &         this%gsa%brc,this%gsa%btc,this%gsa%bpc,          &
+                 &         this%dtB_arrays%BtVrLM,this%dtB_arrays%BpVrLM,   &
+                 &         this%dtB_arrays%BrVtLM,this%dtB_arrays%BrVpLM,   &
+                 &         this%dtB_arrays%BtVpLM,this%dtB_arrays%BpVtLM,   &
+                 &         this%dtB_arrays%BrVZLM,this%dtB_arrays%BtVZLM,   &
+                 &         this%dtB_arrays%BpVtBtVpCotLM,                   &
+                 &         this%dtB_arrays%BpVtBtVpSn2LM,                   &
                  &         this%dtB_arrays%BtVZsn2LM)
          end if
 
@@ -453,7 +431,7 @@ contains
          call this%nl_lm%get_td(nR, nBc, lPressNext, dVSrLM(:,nR), dVXirLM(:,nR), &
               &                 dVxVhLM(:,nR), dVxBhLM(:,nR), dwdt(:,nR),         &
               &                 dzdt(:,nR), dpdt(:,nR), dsdt(:,nR), dxidt(:,nR),  &
-              &                 dphidt(:,nR), dbdt(:,nR), djdt(:,nR))
+              &                 dbdt(:,nR), djdt(:,nR))
          call td_counter%stop_count(l_increment=.false.)
 
          !-- Finish computation of r.m.s. forces
@@ -473,15 +451,25 @@ contains
          !--- Form partial horizontal derivaties of magnetic production and
          !    advection terms:
          if ( l_dtB ) then
-            call get_dH_dtBLM(nR,this%dtB_arrays%BtVrLM,this%dtB_arrays%BpVrLM,     &
-                 &            this%dtB_arrays%BrVtLM,this%dtB_arrays%BrVpLM,        &
-                 &            this%dtB_arrays%BtVpLM,this%dtB_arrays%BpVtLM,        &
-                 &            this%dtB_arrays%BrVZLM,this%dtB_arrays%BtVZLM,        &
-                 &            this%dtB_arrays%BtVpCotLM,this%dtB_arrays%BpVtCotLM,  &
-                 &            this%dtB_arrays%BtVpSn2LM,this%dtB_arrays%BpVtSn2LM)
+            call get_dH_dtBLM(nR,this%dtB_arrays%BtVrLM,this%dtB_arrays%BpVrLM, &
+                 &            this%dtB_arrays%BrVtLM,this%dtB_arrays%BrVpLM,    &
+                 &            this%dtB_arrays%BtVpLM,this%dtB_arrays%BpVtLM,    &
+                 &            this%dtB_arrays%BrVZLM,this%dtB_arrays%BtVZLM,    &
+                 &            this%dtB_arrays%BpVtBtVpCotLM,                    &
+                 &            this%dtB_arrays%BpVtBtVpSn2LM)
          end if
 
       end do
+
+      !------ Set nonlinear terms that are possibly needed at the boundaries.
+      !       They may be overwritten by get_td later.
+      if ( rank == 0 ) then
+         if ( l_heat ) dVSrLM(:,n_r_cmb) =zero
+         if ( l_chemical_conv ) dVXirLM(:,n_r_cmb)=zero
+      else if (rank == n_procs-1) then
+         if ( l_heat ) dVSrLM(:,n_r_icb) =zero
+         if ( l_chemical_conv ) dVXirLM(:,n_r_icb)=zero
+      end if
 
       phy2lm_counter%n_counts=phy2lm_counter%n_counts+1
       lm2phy_counter%n_counts=lm2phy_counter%n_counts+1
@@ -496,7 +484,7 @@ contains
    subroutine transform_to_grid_space(this, nR, nBc, lViscBcCalc, lRmsCalc,      &
               &                       lPressCalc, lTOCalc, lPowerCalc,           &
               &                       lFluxProfCalc, lPerpParCalc, lHelCalc,     &
-              &                       lGeosCalc, l_frame, lDeriv)
+              &                       lGeosCalc, lHemiCalc, l_frame, lDeriv)
       !
       ! This subroutine actually handles the spherical harmonic transforms from
       ! (\ell,m) space to (\theta,\phi) space.
@@ -508,7 +496,7 @@ contains
       integer, intent(in) :: nR, nBc
       logical, intent(in) :: lViscBcCalc, lRmsCalc, lPressCalc, lTOCalc, lPowerCalc
       logical, intent(in) :: lFluxProfCalc, lPerpParCalc, lHelCalc, l_frame
-      logical, intent(in) :: lDeriv, lGeosCalc
+      logical, intent(in) :: lDeriv, lGeosCalc, lHemiCalc
 
       if ( l_conv .or. l_mag_kin ) then
          if ( l_heat ) then
@@ -557,6 +545,7 @@ contains
                !-- For some outputs one still need the other terms
                if ( lViscBcCalc .or. lPowerCalc .or. lRmsCalc .or. lFluxProfCalc &
                &    .or. lTOCalc .or. lHelCalc .or. lPerpParCalc .or. lGeosCalc  &
+               &    .or. lHemiCalc                                               &
                &    .or. ( l_frame .and. l_movie_oc .and. l_store_frame) ) then
                   call torpol_to_spat(dw_Rloc(:,nR), ddw_Rloc(:,nR),         &
                        &              dz_Rloc(:,nR), this%gsa%dvrdrc,        &
@@ -597,23 +586,28 @@ contains
                     &                 this%gsa%dvtdpc, this%gsa%dvpdpc, l_R(nR))
             end if
          else if ( nBc == 2 ) then
-            if ( nR == n_r_cmb ) then
-               call v_rigid_boundary(nR, omega_ma, lDeriv, this%gsa%vrc,        &
-                    &                this%gsa%vtc, this%gsa%vpc, this%gsa%cvrc, &
-                    &                this%gsa%dvrdtc, this%gsa%dvrdpc,          &
-                    &                this%gsa%dvtdpc,this%gsa%dvpdpc)
-            else if ( nR == n_r_icb ) then
-               call v_rigid_boundary(nR, omega_ic, lDeriv, this%gsa%vrc,      &
-                    &                this%gsa%vtc, this%gsa%vpc,              &
-                    &                this%gsa%cvrc, this%gsa%dvrdtc,          &
-                    &                this%gsa%dvrdpc, this%gsa%dvtdpc,        &
-                    &                this%gsa%dvpdpc)
+            if ( nR == n_r_cmb .and. ellip_fac_cmb == 0.0_cp ) then
+               call v_rigid_boundary(nR, omega_ma, lDeriv, this%gsa%vrc,      &
+                    &              this%gsa%vtc, this%gsa%vpc, this%gsa%cvrc, &
+                    &              this%gsa%dvrdtc, this%gsa%dvrdpc,          &
+                    &              this%gsa%dvtdpc,this%gsa%dvpdpc)
+            else if ( nR == n_r_icb .and. ellip_fac_icb == 0.0_cp ) then
+               call v_rigid_boundary(nR, omega_ic, lDeriv, this%gsa%vrc,    &
+                    &              this%gsa%vtc, this%gsa%vpc,              &
+                    &              this%gsa%cvrc, this%gsa%dvrdtc,          &
+                    &              this%gsa%dvrdpc, this%gsa%dvtdpc,        &
+                    &              this%gsa%dvpdpc)
             end if
             if ( lDeriv ) then
                call torpol_to_spat(dw_Rloc(:,nR), ddw_Rloc(:,nR), dz_Rloc(:,nR), &
                     &              this%gsa%dvrdrc, this%gsa%dvtdrc,             &
                     &              this%gsa%dvpdrc, l_R(nR))
             end if
+         end if
+
+         if ( nR == n_r_icb .and. l_full_sphere ) then
+            call v_center_sphere(ddw_Rloc(:,nR), this%gsa%vrc, this%gsa%vtc, &
+                 &               this%gsa%vpc)
          end if
       end if
 
@@ -627,11 +621,16 @@ contains
                  &                   this%gsa%cbrc, this%gsa%cbtc,          &
                  &                   this%gsa%cbpc, l_R(nR))
          end if
+
+         if ( nR == n_r_icb .and. l_full_sphere ) then
+            call v_center_sphere(ddb_Rloc(:,nR), this%gsa%brc, this%gsa%btc, &
+                 &               this%gsa%bpc)
+         end if
       end if
 
    end subroutine transform_to_grid_space
 !-------------------------------------------------------------------------------
-   subroutine transform_to_lm_space(this, nR, lRmsCalc)
+   subroutine transform_to_lm_space(this, nR, lRmsCalc, dVSrLM, dVXirLM, dphidt)
       !
       ! This subroutine actually handles the spherical harmonic transforms from
       ! (\theta,\phi) space to (\ell,m) space.
@@ -642,6 +641,11 @@ contains
       !-- Input variables
       integer, intent(in) :: nR
       logical, intent(in) :: lRmsCalc
+
+      !-- Output variables
+      complex(cp), intent(out) :: dVSrLM(lm_max)
+      complex(cp), intent(out) :: dVXirLM(lm_max)
+      complex(cp), intent(out) :: dphidt(lm_max)
 
       !-- Local variables
       integer :: nPhi, nPhStart, nPhStop
@@ -691,19 +695,16 @@ contains
 
       if ( l_heat ) then
          call spat_to_qst(this%gsa%VSr, this%gsa%VSt, this%gsa%VSp, &
-              &           this%nl_lm%VSrLM, this%nl_lm%VStLM,       &
-              &           this%nl_lm%VSpLM, l_R(nR))
+              &           dVSrLM, this%nl_lm%VStLM, this%nl_lm%VSpLM, l_R(nR))
 
          if ( l_anel ) call scal_to_SH(this%gsa%heatTerms, this%nl_lm%heatTermsLM, &
                             &          l_R(nR))
       end if
       if ( l_chemical_conv ) then
          call spat_to_qst(this%gsa%VXir, this%gsa%VXit, this%gsa%VXip, &
-              &           this%nl_lm%VXirLM, this%nl_lm%VXitLM,        &
-              &           this%nl_lm%VXipLM, l_R(nR))
+              &           dVXirLM, this%nl_lm%VXitLM, this%nl_lm%VXipLM, l_R(nR))
       end if
-      if( l_phase_field ) call scal_to_SH(this%gsa%phiTerms, this%nl_lm%dphidtLM, &
-                               &          l_R(nR))
+      if( l_phase_field ) call scal_to_SH(this%gsa%phiTerms, dphidt,l_R(nR))
       if ( l_mag_nl ) then
          if ( nR>n_r_LCR ) then
             call spat_to_qst(this%gsa%VxBr, this%gsa%VxBt, this%gsa%VxBp, &

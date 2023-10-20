@@ -66,6 +66,8 @@ class TestRMSOutputs(unittest.TestCase):
             os.remove(f)
         for f in glob.glob('%s/*.continue' % self.dir):
             os.remove(f)
+        for f in glob.glob('%s/*.FD' % self.dir):
+            os.remove(f)
         os.chdir(self.dir)
         cmd = '%s %s/input.nml' % (self.execCmd, self.dir)
         sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
@@ -73,7 +75,10 @@ class TestRMSOutputs(unittest.TestCase):
         cmd = '%s %s/input_restart.nml' % (self.execCmd, self.dir)
         sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
                 stderr=open(os.devnull, 'wb'))
-        cmd = 'cat dtVrms.start dtBrms.start dtVrms.continue dtBrms.continue > e_kin.test'
+        cmd = '%s %s/input_FD.nml' % (self.execCmd, self.dir)
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
+        cmd = 'cat dtVrms.start dtBrms.start dtVrms.continue dtBrms.continue dtVrms.FD dtBrms.FD > e_kin.test'
         sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
 
     def tearDown(self):
@@ -84,14 +89,19 @@ class TestRMSOutputs(unittest.TestCase):
             os.remove(f)
         for f in glob.glob('%s/*.continue' % self.dir):
             os.remove(f)
+        for f in glob.glob('%s/*.FD' % self.dir):
+            os.remove(f)
 
         t = time.time()-self.startTime
         st = time.strftime("%M:%S", time.gmtime(t))
         print('Time used   :                            %s' % st)
 
         if hasattr(self, '_outcome'): # python 3.4+
-            result = self.defaultTestResult()
-            self._feedErrorsToResult(result, self._outcome.errors)
+            if hasattr(self._outcome, 'errors'):  # python 3.4-3.10
+                result = self.defaultTestResult()
+                self._feedErrorsToResult(result, self._outcome.errors)
+            else:  # python 3.11+
+                result = self._outcome.result
         else:  # python 2.7-3.3
             result = getattr(self, '_outcomeForDoCleanups', 
                              self._resultForDoCleanups)

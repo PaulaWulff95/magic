@@ -16,6 +16,14 @@ Outer Core
 
 * **n_cheb_max** (default :f:var:`n_cheb_max=31 <n_cheb_max>`) is an integer which is the number of terms in the Chebyshev polynomial expansion to be used in the radial direction - the highest degree of Chebyshev polynomial used being ``n_cheb_max-1``. Note that ``n_cheb_max <= n_r_max``. This quantity will not be used if finite differences are used.
 
+.. note:: The horizontal resolution can be either specified in the physical space using `n_phi_tot`, the total number of azimuhtal grid points or by defining `l_max` and `m_max`. The different options are described below.
+
+* **l_max** (default :f:var:`l_max=0 <l_max>`) is an integer which gives the maximum spherical harmonic degree. When `l_max /= 0`, the value of `n_phi_tot` in the input namelist is ignored and recomputed at the initialisation stage.
+
+* **m_max** (default :f:var:`m_max=0 <m_max>`) is an integer which gives the maximum spherical harmonic order. It can be different from `l_max`.
+
+* **m_min** (default :f:var:`m_min=0 <m_min>`) is an integer which gives the minimum spherical harmonic order. By default this is set to zero, if specified in combination with `m_max`, it implies that only azimuthal wavenumbers comprised between `m_min` and `m_max` will be considered. This is particularly useful when computing the onset of convection.
+
 * **n_phi_tot** (default :f:var:`n_phi_tot=192 <n_phi_tot>`) is an integer which gives the number of longitudinal/azimuthal grid points. It has the following constraints:
  
   - :f:var:`n_phi_tot` must be a multiple of :f:var:`minc` (see below)
@@ -43,9 +51,15 @@ Outer Core
 * **l_var_l** (default :f:var:`l_var_l=.false. <l_var_l>`) is a logical. The spherical harmonic degree is a function of radius, when set to true. This practically reduces the number of spherical harmonic transforms in parts of the fluid domain but it comes at the price of an MPI inbalance. This feature is useful when computing full sphere geometry to avoid a too severe time step limitation close to the center. Right now the form of the radial dependence follows:
 
   .. math::
-     \ell(r) = 1+(\ell_{\hbox{max}}-1)\sqrt{\frac{r}{r_o}}
+     \ell(r) = \max \left(1+\ell_{\hbox{max}}\sqrt{\frac{r}{\alpha_r r_o}},\ell_{\hbox{max}}\right)
 
   ..
+
+In the above equation the parameter :math:`\alpha_r` is set to control the radius above which the truncation reaches :math:`\ell_{\hbox{max}}`. In the case of full spheres with :math:`r_o=1`, one directly has :math:`\ell(r)=\ell_{\hbox{max}}` for :math:`r>\alpha_r`.
+
+This parameter can be directly controlled by the following entry in the input namelist:
+
+* **rcut_l** (default :f:var:`rcut_l=0.1 <rcut_l>`) is a real. This corresponds to :math:`\alpha_r` in the above equation.
 
 
 Inner Core

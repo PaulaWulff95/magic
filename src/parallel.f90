@@ -14,6 +14,7 @@ module parallel_mod
    integer :: rank,n_procs
    integer :: nR_per_rank
    integer :: rank_with_l1m0
+   integer :: rank_with_r_LCR
    integer :: chunksize
    integer :: ierr
 
@@ -104,6 +105,7 @@ contains
 #endif
 
       n_points=nStop-nStart+1
+      if ( n_points == 1) return ! No need to split one point among threads
       n_glob_start=nStart
 
 #ifdef WITHOMP

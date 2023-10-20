@@ -1,7 +1,7 @@
 module start_fields
    !
    ! This module is used to set-up the initial starting fields. They can be obtained
-   ! by reading a starting checkpoint file or by setting some starting conditions. 
+   ! by reading a starting checkpoint file or by setting some starting conditions.
    !
 
    use truncation
@@ -10,29 +10,29 @@ module start_fields
    use radial_data, only: n_r_cmb, n_r_icb, nRstart, nRstop
    use communications, only: lo2r_one
    use radial_functions, only: rscheme_oc, r, or1, alpha0, dLtemp0,      &
-       &                       dLalpha0, beta, orho1, temp0, rho0,       &
-       &                       otemp1, ogrun
+       &                       dLalpha0, beta, orho1, temp0, rho0, r_cmb,&
+       &                       otemp1, ogrun, dentropy0, dxicond, r_icb
    use physical_parameters, only: interior_model, epsS, impS, n_r_LCR,   &
        &                          ktopv, kbotv, LFfac, imagcon, ThExpNb, &
-       &                          ViscHeatFac, impXi
+       &                          ViscHeatFac, impXi, ampForce
    use num_param, only: dtMax, alpha
    use special, only: lGrenoble
    use output_data, only: log_file, n_log_file
    use blocking, only: lo_map, llm, ulm, ulmMag, llmMag
    use logic, only: l_conv, l_mag, l_cond_ic, l_heat, l_SRMA, l_SRIC,    &
-       &            l_mag_kin, l_mag_LF, l_rot_ic, l_z10Mat, l_LCR,      &
+       &            l_mag_kin, l_mag_LF, l_rot_ic, l_z10Mat,             &
        &            l_rot_ma, l_temperature_diff, l_single_matrix,       &
        &            l_chemical_conv, l_anelastic_liquid, l_save_out,     &
-       &            l_parallel_solve, l_mag_par_solve, l_phase_field
+       &            l_parallel_solve, l_mag_par_solve, l_phase_field,    &
+       &            l_onset, l_non_adia
    use init_fields, only: l_start_file, init_s1, init_b1, tops, pt_cond,  &
        &                  initV, initS, initB, initXi, ps_cond,           &
        &                  start_file, init_xi1, topxi, xi_cond, omega_ic1,&
-       &                  omega_ma1, initPhi, init_phi
+       &                  omega_ma1, initPhi, init_phi, initF
    use fields ! The entire module is required
    use fieldsLast ! The entire module is required
    use timing, only: timer_type
-   use constants, only: zero, c_lorentz_ma, c_lorentz_ic, osq4pi, &
-       &            one, two
+   use constants, only: zero, c_lorentz_ma, c_lorentz_ic, osq4pi, one, two, sq4pi
    use useful, only: cc2real, logWrite
    use radial_der, only: get_dr, exch_ghosts, bulk_to_ghost
    use readCheckPoints, only: readStartFields_old, readStartFields
@@ -82,17 +82,12 @@ contains
       class(type_tscheme), intent(inout) :: tscheme
 
       !-- Local variables:
-      integer :: l, m, n_r
+      integer :: l, m, n_r, filehandle, lm00
       character(len=76) :: message
-
-      real(cp) :: sEA,sES,sAA
-      real(cp) :: xiEA,xiES,xiAA
-
+      real(cp) :: sEA,sES,sAA,xiEA,xiES,xiAA,topval,botval
       real(cp) :: s0(n_r_max),p0(n_r_max),ds0(n_r_max),dp0(n_r_max)
-
       logical :: lMat
       type(timer_type) :: t_reader
-      integer :: filehandle
 
       call t_reader%initialize()
 
@@ -182,6 +177,8 @@ contains
 
          end if
 
+         if ( l_onset .and. ( .not. l_non_adia ) ) dentropy0(:) = ds0(:) * osq4pi
+
          if ( rank == 0 ) close(filehandle)
 
       else
@@ -196,11 +193,13 @@ contains
          topxicond=-osq4pi*ds0(1)
          botxicond=-osq4pi*ds0(n_r_max)
          deltaxicond=osq4pi*(s0(n_r_max)-s0(1))
+         if ( l_onset ) dxicond(:)=ds0(:) * osq4pi
       else
          topxicond  =0.0_cp
          botxicond  =0.0_cp
          deltaxicond=0.0_cp
       end if
+
 
       !-- Start with setting fields to zero:
       !   Touching the fields with the appropriate processor
@@ -255,6 +254,29 @@ contains
          end if
 
          if ( .not. l_heat ) s_LMloc(:,:)=zero
+
+         lm00 = lo_map%lm2(0,0)
+         !-- In case temperature/entropy was imposed on both boundaries, simply
+         !-- translate it to (0,1) instead of legacy contrast
+         if ( l_heat .and. llm <= lm00 .and. ulm >= lm00 ) then
+            topval=-r_icb**2/(r_icb**2+r_cmb**2)*sq4pi
+            botval= r_cmb**2/(r_icb**2+r_cmb**2)*sq4pi
+            if ( abs(s_LMloc(lm00,n_r_cmb)-topval) <= 100.0_cp*epsilon(one) .and. &
+            &    abs(s_LMloc(lm00,n_r_icb)-botval) <= 100.0_cp*epsilon(one) ) then
+               s_LMloc(lm00,:)=s_LMloc(lm00,:)-cmplx(topval,0.0_cp,cp)
+            end if
+         end if
+
+         !-- In case chemical composition was imposed on both boundaries, simply
+         !-- translate it to (0,1) instead of legacy contrast
+         if ( l_chemical_conv .and. llm <= lm00 .and. ulm >= lm00 ) then
+            topval=-r_icb**2/(r_icb**2+r_cmb**2)*sq4pi
+            botval= r_cmb**2/(r_icb**2+r_cmb**2)*sq4pi
+            if ( abs(xi_LMloc(lm00,n_r_cmb)-topval) <= 100.0_cp*epsilon(one) .and. &
+            &    abs(xi_LMloc(lm00,n_r_icb)-botval) <= 100.0_cp*epsilon(one) ) then
+               xi_LMloc(lm00,:)=xi_LMloc(lm00,:)-cmplx(topval,0.0_cp,cp)
+            end if
+         end if
 
       else ! If there's no restart file
 
@@ -419,30 +441,18 @@ contains
       sES=0.0_cp
       sEA=0.0_cp
       sAA=0.0_cp
-      if ( .not. l_axi ) then
-         do m=0,l_max,minc
-            do l=m,l_max
-               if ( l > 0 ) then
-                  if ( mod(l+m,2) == 0 ) then
-                     sES=sES+cc2real(tops(l,m),m)
-                  else
-                     sEA=sEA+cc2real(tops(l,m),m)
-                  end if
-                  if ( m /= 0 ) sAA=sAA+cc2real(tops(l,m),m)
-               end if
-            end do
-         end do
-      else
-         do l=0,l_max
+      do m=m_min,m_max,minc
+         do l=m,l_max
             if ( l > 0 ) then
-               if ( mod(l,2) == 0 ) then
-                  sES=sES+cc2real(tops(l,0),0)
+               if ( mod(l+m,2) == 0 ) then
+                  sES=sES+cc2real(tops(l,m),m)
                else
-                  sEA=sEA+cc2real(tops(l,0),0)
+                  sEA=sEA+cc2real(tops(l,m),m)
                end if
+               if ( m /= 0 ) sAA=sAA+cc2real(tops(l,m),m)
             end if
          end do
-      end if
+      end do
       if ( sEA+sES == 0 ) then
          write(message,'(''! Only l=m=0 comp. in tops:'')')
          call logWrite(message)
@@ -460,30 +470,18 @@ contains
          xiES=0.0_cp
          xiEA=0.0_cp
          xiAA=0.0_cp
-         if ( .not. l_axi ) then
-            do m=0,l_max,minc
-               do l=m,l_max
-                  if ( l > 0 ) then
-                     if ( mod(l+m,2) == 0 ) then
-                        xiES=xiES+cc2real(topxi(l,m),m)
-                     else
-                        xiEA=xiEA+cc2real(topxi(l,m),m)
-                     end if
-                     if ( m /= 0 ) xiAA=xiAA+cc2real(topxi(l,m),m)
-                  end if
-               end do
-            end do
-         else
-            do l=0,l_max
+         do m=m_min,m_max,minc
+            do l=m,l_max
                if ( l > 0 ) then
-                  if ( mod(l,2) == 0 ) then
-                     xiES=xiES+cc2real(topxi(l,0),0)
+                  if ( mod(l+m,2) == 0 ) then
+                     xiES=xiES+cc2real(topxi(l,m),m)
                   else
-                     xiEA=xiEA+cc2real(topxi(l,0),0)
+                     xiEA=xiEA+cc2real(topxi(l,m),m)
                   end if
+                  if ( m /= 0 ) xiAA=xiAA+cc2real(topxi(l,m),m)
                end if
             end do
-         end if
+         end do
          if ( xiEA+xiES == 0 ) then
             write(message,'(''! Only l=m=0 comp. in topxi:'')')
             call logWrite(message)
@@ -494,6 +492,13 @@ contains
             call logWrite(message)
             write(message,'(''! Rel. RMS axi. asym. topxi:'',ES16.6)') xiAA
             call logWrite(message)
+         end if
+      end if
+
+      if ( ampForce /= 0.0_cp ) then
+         call initF(bodyForce_LMloc)
+         if ( l_parallel_solve ) then
+            call lo2r_one%transp_lm2r(bodyForce_LMloc, bodyForce_Rloc)
          end if
       end if
 

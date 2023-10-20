@@ -12,7 +12,7 @@ module fields_average_mod
        &                       rscheme_oc, l_R
    use blocking,only: lm2, llm, ulm, llmMag, ulmMag
    use logic, only: l_mag, l_conv, l_save_out, l_heat, l_cond_ic, &
-       &            l_chemical_conv, l_phase_field
+       &            l_chemical_conv, l_phase_field, l_onset
    use kinetic_energy, only: get_e_kin
    use magnetic_energy, only: get_e_mag
    use output_data, only: tag, n_log_file, log_file, n_graphs, l_max_cmb
@@ -27,7 +27,7 @@ module fields_average_mod
 #else
    use out_coeff, only: write_Pot
 #endif
-   use spectra, only: spectrum, spectrum_temp
+   use spectra, only: spectrum
    use graphOut_mod, only: graphOut_IC, open_graph_file, close_graph_file
 #ifdef WITH_MPI
    use graphOut_mod, only: graphOut_mpi, graphOut_mpi_header
@@ -172,14 +172,13 @@ contains
       ! fields for the gathering
       complex(cp) :: b_ic_ave_global(1:lm_maxMag,n_r_ic_maxMag)
       complex(cp) :: db_ic_ave_global(1:lm_maxMag,n_r_ic_maxMag)
-      complex(cp) :: ddb_ic_ave_global(1:lm_maxMag,n_r_ic_maxMag)
       complex(cp) :: aj_ic_ave_global(1:lm_maxMag,n_r_ic_maxMag)
-      complex(cp) :: dj_ic_ave_global(1:lm_maxMag,n_r_ic_maxMag)
 
       !----- Time averaged fields:
       complex(cp) :: dw_ave_LMloc(llm:ulm,n_r_max)
       complex(cp) :: dw_ave_Rloc(lm_max,nRstart:nRstop)
       complex(cp) :: ds_ave_LMloc(llm:ulm,n_r_max)
+      complex(cp) :: dxi_ave_LMloc(llm:ulm,n_r_max)
       complex(cp) :: db_ave_LMloc(llm:ulm,n_r_maxMag)
       complex(cp) :: db_ave_Rloc(lm_maxMag,nRstart:nRstop)
       complex(cp) :: db_ic_ave(llm:ulm,n_r_ic_max)
@@ -224,8 +223,8 @@ contains
       real(cp) :: e_mag_os_ave,e_mag_as_os_ave
       real(cp) :: Dip,DipCMB,e_cmb,elsAnel
 
-      integer :: nR
-      integer :: n_e_sets,n_spec
+      integer :: nR, n_graph_handle
+      integer :: n_e_sets
 
       character(len=80) :: outFile
       integer :: nOut,n_cmb_sets,nPotSets
@@ -323,6 +322,10 @@ contains
             call get_dr(s_ave_LMloc,ds_ave_LMloc,ulm-llm+1,1,ulm-llm+1,n_r_max, &
                  &      rscheme_oc,nocopy=.true.)
          end if
+         if ( l_chemical_conv ) then
+            call get_dr(xi_ave_LMloc,dxi_ave_LMloc,ulm-llm+1,1,ulm-llm+1,n_r_max, &
+                 &      rscheme_oc,nocopy=.true.)
+         end if
          if ( l_cond_ic ) then
             call get_ddrNS_even(b_ic_ave,db_ic_ave,ddb_ic_ave,ulm-llm+1,1,     &
                  &              ulm-llm+1,n_r_ic_max,n_cheb_ic_max,dr_fac_ic,  &
@@ -334,16 +337,12 @@ contains
 
          !----- Get averaged spectra:
          !      Note: average spectra will be in file no 0
-         n_spec=0
-         call spectrum(n_spec,time,.false.,nAve,l_stop_time,time_passed, &
-              &        time_norm,w_ave_LMloc,dw_ave_LMloc,z_ave_LMloc,   &
-              &        b_ave_LMloc,db_ave_LMloc,aj_ave_LMloc,b_ic_ave,   &
-              &        db_ic_ave,aj_ic_ave)
+         call spectrum(0,time,.false.,nAve,l_stop_time,time_passed,        &
+              &        time_norm,s_ave_LMloc,ds_ave_LMloc,xi_ave_LMloc,    &
+              &        dxi_ave_LMloc,phi_ave_LMloc,w_ave_LMloc,            &
+              &        dw_ave_LMloc,z_ave_LMloc,b_ave_LMloc,db_ave_LMloc,  &
+              &        aj_ave_LMloc,b_ic_ave,db_ic_ave,aj_ic_ave)
 
-         if ( l_heat ) then
-            call spectrum_temp(n_spec,time,.false.,0,l_stop_time,     &
-                 &             0.0_cp,0.0_cp,s_ave_LMloc,ds_ave_LMloc)
-         end if
          if ( rank==0 .and. l_save_out ) then
             open(newunit=n_log_file, file=log_file, status='unknown', &
             &    position='append')
@@ -408,58 +407,60 @@ contains
          !----- Construct name of graphic file and open it:
          ! For the graphic file of the average fields, we gather them
          ! on rank 0 and use the old serial output routine.
-
-         call open_graph_file(0, time, l_ave=.true.)
+         if ( .not. l_onset ) then
+            call open_graph_file(0, time, .true., n_graph_handle)
          !----- Write header into graphic file:
 #ifdef WITH_MPI
-         call graphOut_mpi_header(time)
+            call graphOut_mpi_header(time, n_graph_handle)
 #else
-         call graphOut_header(time)
+            call graphOut_header(time, n_graph_handle)
 #endif
 
-         !-- This will be needed for the inner core
-         if ( l_mag ) then
-            call gather_from_lo_to_rank0(b_ave_LMloc(llm,n_r_icb),bICB)
-         end if
-
-         !-- MPI transposes from LMloc to Rloc
-         call lo2r_one%transp_lm2r(z_ave_LMloc, z_ave_Rloc)
-         call lo2r_one%transp_lm2r(w_ave_LMloc, w_ave_Rloc)
-         call lo2r_one%transp_lm2r(dw_ave_LMloc, dw_ave_Rloc)
-         call lo2r_one%transp_lm2r(s_ave_LMloc, s_ave_Rloc)
-         call lo2r_one%transp_lm2r(p_ave_LMloc, p_ave_Rloc)
-
-         if ( l_mag ) then
-            call lo2r_one%transp_lm2r(aj_ave_LMloc, aj_ave_Rloc)
-            call lo2r_one%transp_lm2r(aj_ave_LMloc, b_ave_Rloc)
-            call lo2r_one%transp_lm2r(db_ave_LMloc, db_ave_Rloc)
-         end if
-
-         if ( l_chemical_conv ) call lo2r_one%transp_lm2r(xi_ave_LMloc, xi_ave_Rloc)
-         if ( l_phase_field ) call lo2r_one%transp_lm2r(phi_ave_LMloc, phi_ave_Rloc)
-
-         !----- Outer core:
-         do nR=nRstart,nRstop
+            !-- This will be needed for the inner core
             if ( l_mag ) then
-               call torpol_to_spat(b_ave_Rloc(:,nR), db_ave_Rloc(:,nR), &
-                    &              aj_ave_Rloc(:,nR), Br, Bt, Bp, l_R(nR))
+               call gather_from_lo_to_rank0(b_ave_LMloc(:,n_r_icb),bICB)
             end if
-            call torpol_to_spat(w_ave_Rloc(:,nR), dw_ave_Rloc(:,nR), &
-                 &              z_ave_Rloc(:,nR), Vr, Vt, Vp, l_R(nR))
-            call scal_to_spat(p_ave_Rloc(:,nR), Prer, l_R(nR))
-            if ( l_heat ) then
-               call scal_to_spat(s_ave_Rloc(:,nR), Sr, l_R(nR))
+
+            !-- MPI transposes from LMloc to Rloc
+            call lo2r_one%transp_lm2r(z_ave_LMloc, z_ave_Rloc)
+            call lo2r_one%transp_lm2r(w_ave_LMloc, w_ave_Rloc)
+            call lo2r_one%transp_lm2r(dw_ave_LMloc, dw_ave_Rloc)
+            call lo2r_one%transp_lm2r(s_ave_LMloc, s_ave_Rloc)
+            call lo2r_one%transp_lm2r(p_ave_LMloc, p_ave_Rloc)
+
+            if ( l_mag ) then
+               call lo2r_one%transp_lm2r(aj_ave_LMloc, aj_ave_Rloc)
+               call lo2r_one%transp_lm2r(aj_ave_LMloc, b_ave_Rloc)
+               call lo2r_one%transp_lm2r(db_ave_LMloc, db_ave_Rloc)
             end if
-            if ( l_chemical_conv ) then
-               call scal_to_spat(xi_ave_Rloc(:,nR), Xir, l_R(nR))
-            end if
-            if ( l_phase_field ) then
-               call scal_to_spat(phi_ave_Rloc(:,nR), Phir, l_R(nR))
-            end if
+
+            if ( l_chemical_conv ) call lo2r_one%transp_lm2r(xi_ave_LMloc, xi_ave_Rloc)
+            if ( l_phase_field ) call lo2r_one%transp_lm2r(phi_ave_LMloc, phi_ave_Rloc)
+
+            !----- Outer core:
+            do nR=nRstart,nRstop
+               if ( l_mag ) then
+                  call torpol_to_spat(b_ave_Rloc(:,nR), db_ave_Rloc(:,nR), &
+                       &              aj_ave_Rloc(:,nR), Br, Bt, Bp, l_R(nR))
+               end if
+               call torpol_to_spat(w_ave_Rloc(:,nR), dw_ave_Rloc(:,nR), &
+                    &              z_ave_Rloc(:,nR), Vr, Vt, Vp, l_R(nR))
+               call scal_to_spat(p_ave_Rloc(:,nR), Prer, l_R(nR))
+               if ( l_heat ) then
+                  call scal_to_spat(s_ave_Rloc(:,nR), Sr, l_R(nR))
+               end if
+               if ( l_chemical_conv ) then
+                  call scal_to_spat(xi_ave_Rloc(:,nR), Xir, l_R(nR))
+               end if
+               if ( l_phase_field ) then
+                  call scal_to_spat(phi_ave_Rloc(:,nR), Phir, l_R(nR))
+               end if
 #ifdef WITH_MPI
-            call graphOut_mpi(nR, Vr, Vt, Vp, Br, Bt, Bp, Sr, Prer, Xir, Phir)
+               call graphOut_mpi(nR, Vr, Vt, Vp, Br, Bt, Bp, Sr, Prer, Xir, Phir, &
+                    &            n_graph_handle)
 #else
-            call graphOut(nR, Vr, Vt, Vp, Br, Bt, Bp, Sr, Prer, Xir, Phir)
+               call graphOut(nR, Vr, Vt, Vp, Br, Bt, Bp, Sr, Prer, Xir, Phir, &
+                    &        n_graph_handle)
 #endif
          end do
 
@@ -509,11 +510,12 @@ contains
                  &           aj_ic_ave_global,bICB)
          end if
 
-         call close_graph_file()
+            call close_graph_file(n_graph_handle)
 
-         !----- Write info about graph-file into STDOUT and log-file:
-         if ( l_stop_time .and. rank == 0 ) then
-            write(n_log_file,'(/,'' ! WRITING AVERAGED GRAPHIC FILE !'')')
+            !----- Write info about graph-file into STDOUT and log-file:
+            if ( l_stop_time .and. rank == 0 ) then
+               write(n_log_file,'(/,'' ! WRITING AVERAGED GRAPHIC FILE !'')')
+            end if
          end if
 
          !--- Store time averaged poloidal magnetic coeffs at cmb

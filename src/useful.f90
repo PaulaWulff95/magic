@@ -20,7 +20,7 @@ module useful
 contains
 
    logical function l_correct_step(n,t,t_last,n_max,n_step,n_intervals, &
-                                   n_ts,times,n_eo)
+                    &              n_ts,times)
       !
       ! Suppose we have a (loop) maximum of n_max steps!
       ! If n_intervals times in these steps a certain action should be carried out
@@ -42,11 +42,9 @@ contains
       integer,  intent(in) :: n_step       ! action interval
       integer,  intent(in) :: n_intervals  ! number of actions
       integer,  intent(in) :: n_ts         ! number of times t
-      real(cp), intent(in) :: times(*)     ! times where l_correct_step == true
-      integer,  intent(in) :: n_eo         ! even/odd controller
+      real(cp), intent(in) :: times(:)     ! times where l_correct_step == true
 
       !-- Local variables:
-      integer :: n_delta      ! corrector for even/odd n
       integer :: n_offset     ! offset with no action
       integer :: n_t          ! counter for times
       integer :: n_steps      ! local step width
@@ -61,22 +59,11 @@ contains
 
       if ( n_intervals /= 0 ) then
          n_steps=n_max/n_intervals
-         if ( ( n_eo == 2 .and. mod(n_step,2) /= 0 ) .or. &
-         &    ( n_eo == 1 .and. mod(n_step,2) /= 1 ) ) then
-            n_steps=n_steps+1
-         end if
-
          n_offset=n_max-n_steps*n_intervals
 
          if ( n > n_offset .and. mod(n-n_offset,n_steps) == 0 ) l_correct_step=.true.
       else if ( n_step /= 0 ) then
-         n_delta=0
-         if ( ( n_eo == 1 .and. mod(n,2) == 0 ) .or. &
-         &    ( n_eo == 2 .and. mod(n,2) == 1 ) ) then
-            n_delta=1
-         end if
-
-         if ( n == n_max .or. mod(n-n_delta,n_step) == 0 ) l_correct_step=.true.
+         if ( n == n_max .or. mod(n,n_step) == 0 ) l_correct_step=.true.
       end if
 
       if ( n_ts >= 1 ) then
@@ -292,18 +279,21 @@ contains
       !-- Local variables:
       integer :: code
 
-      code = 32
 
-      write(output_unit,*)
-      write(output_unit,*)
-      write(output_unit,*)
-      write(output_unit,*) '! Something went wrong, MagIC will stop now'
-      write(output_unit,*) '! See below the error message:'
-      write(output_unit,*)
-      write(output_unit,*) message
-      write(output_unit,*)
+      if ( rank == 0 ) then
+         write(output_unit,*)
+         write(output_unit,*)
+         write(output_unit,*)
+         write(output_unit,*) '! Something went wrong, MagIC will stop now'
+         write(output_unit,*) '! See below the error message:'
+         write(output_unit,*)
+         write(output_unit,*) message
+         write(output_unit,*)
+         code = 32
+      end if
 
 #ifdef WITH_MPI
+      call MPI_BCast(code, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
       call MPI_Abort(MPI_COMM_WORLD, code, ierr)
 #else
       stop
@@ -311,7 +301,7 @@ contains
 
    end subroutine abortRun
 !----------------------------------------------------------------------------
-   real(cp) function round_off(param, ref)
+   real(cp) function round_off(param, ref, cut)
       !
       ! This function rounds off tiny numbers. This is only used for some
       ! outputs.
@@ -320,8 +310,18 @@ contains
       !-- Input variable
       real(cp), intent(in) :: param   ! parameter to be checked
       real(cp), intent(in) :: ref     ! reference value
+      real(cp), optional, intent(in) :: cut ! cutoff factor compared to machine epsilon
 
-      if ( abs(param) < 1.0e3_cp*epsilon(one)*abs(ref) ) then
+      !-- Local variables
+      real(cp) :: fac
+
+      if (present(cut)) then
+         fac = cut
+      else
+         fac = 1e3_cp
+      end if
+
+      if ( abs(param) < fac*epsilon(one)*abs(ref) ) then
          round_off = 0.0_cp
       else
          round_off = param

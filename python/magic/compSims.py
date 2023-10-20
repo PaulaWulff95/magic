@@ -251,7 +251,7 @@ class CompSims:
 
             ax.plot(vpm[:, 1], theta)
 
-            roequat = vpm[gr.ntheta/2, 0]*gr.ek*(1.-gr.radratio)
+            roequat = vpm[gr.ntheta//2, 0]*gr.ek*(1.-gr.radratio)
             print('{:7.3e} {:7.3e}'.format(gr.ra, roequat))
             for tick in ax.xaxis.get_major_ticks():
                 tick.label1.set_fontsize(10)

@@ -118,7 +118,8 @@ program magic
    use fields_average_mod
    use geos, only: initialize_geos, finalize_geos
    use spectra, only: initialize_spectra, finalize_spectra
-   use output_data, only: tag, log_file, n_log_file
+   use output_data, only: tag, log_file, n_log_file, initialize_output_data, &
+       &                  finalize_output_data
    use output_mod, only: initialize_output, finalize_output
    use outTO_mod,only: initialize_outTO_mod, finalize_outTO_mod
    use parallel_mod
@@ -235,6 +236,9 @@ program magic
       write(output_unit, '(A,A)') ' !  Start date:  ', date
    end if
 
+   !-- Allocate time arrays:
+   call initialize_output_data()
+
    !--- Read input parameters:
    call readNamelists(tscheme)  ! includes sent to other procs !
 
@@ -249,11 +253,11 @@ program magic
       open(newunit=n_log_file, file=log_file, status='new')
 
       write(n_log_file,*) '!      __  __             _____ _____     __   ___       '
-      write(n_log_file,*) '!     |  \/  |           |_   _/ ____|   / /  / _ \      '
-      write(n_log_file,*) '!     | \  / | __ _  __ _  | || |       / /_ | | | |     '
-      write(n_log_file,*) '!     | |\/| |/ _` |/ _` | | || |      |  _ \| | | |     '
-      write(n_log_file,*) '!     | |  | | (_| | (_| |_| || |____  | (_) | |_| |     '
-      write(n_log_file,*) '!     |_|  |_|\__,_|\__, |_____\_____|  \___(_)___/      '
+      write(n_log_file,*) '!     |  \/  |           |_   _/ ____|   / /  |__ \      '
+      write(n_log_file,*) '!     | \  / | __ _  __ _  | || |       / /_     ) |     '
+      write(n_log_file,*) '!     | |\/| |/ _` |/ _` | | || |      |  _ \   / /      '
+      write(n_log_file,*) '!     | |  | | (_| | (_| |_| || |____  | (_) | / /_      '
+      write(n_log_file,*) '!     |_|  |_|\__,_|\__, |_____\_____|  \___(_)____|     '
       write(n_log_file,*) '!                    __/ |                               '
       write(n_log_file,*) '!                   |___/                                '
       write(n_log_file,*) '!                                                        '
@@ -304,11 +308,11 @@ program magic
       if ( l_save_out ) close(n_log_file)
    end if
 
-   call initialize_memory_counter()
+   call initialize_memory_counter(tag)
 
    !-- Blocking/radial/horizontal
    call initialize_blocking()
-   call initialize_sht()
+   if (.not. l_onset ) call initialize_sht(l_scramble_theta)
    local_bytes_used=bytes_allocated
    call initialize_radial_data(n_r_max)
    call initialize_radial_functions()
@@ -356,9 +360,9 @@ program magic
    !--- Do pre-calculations:
    call preCalc(tscheme)
 
-   call initialize_geos(l_par, l_SRIC) ! Needs to be called after preCalc, r_icb needed
    if ( l_TO ) call initialize_outTO_mod() ! Needs to be called after preCalc, r_icb needed
    if ( l_movie ) call initialize_movie_data() !Needs to be called after preCalc to get correct coordinate values
+   call initialize_geos(l_par, l_SRIC, l_geosMovie) ! Needs to be called after preCalc, l_geosMovie defined in movie
    if ( ldtBmem == 1 ) call initialize_dtB_mod() ! Needs to be called after movie to make sure l_dtBmovie has been set
    if (l_probe) call initialize_probes()       !Needs to be called after preCalc to get correct coordinate values
    if ( l_RMS ) call initialize_RMS()
@@ -388,7 +392,7 @@ program magic
    call initialize_courant(time, tscheme%dt(1), tag)
 
    !--- Second pre-calculation:
-   call preCalcTimes(time,n_time_step)
+   call preCalcTimes(time, tEND, tscheme%dt(1), n_time_step, n_time_steps)
 
    !--- Write info to STDOUT and log-file:
    if ( rank == 0 ) then
@@ -480,7 +484,7 @@ program magic
    if ( l_RMS ) call finalize_RMS()
    if ( l_TO ) call finalize_outTO_mod()
    if ( l_TO ) call finalize_TO()
-   call finalize_geos(l_par, l_SRIC)
+   call finalize_geos(l_par, l_SRIC, l_geosMovie)
    if ( ldtBmem == 1 ) call finalize_dtB_mod
    call finalize_fields_average_mod()
    if ( l_power ) call finalize_output_power()
@@ -503,7 +507,7 @@ program magic
    call finalize_LMLoop(tscheme)
    call finalize_radialLoop()
 
-   call finalize_sht()
+   if (.not. l_onset ) call finalize_sht()
    call finalize_der_arrays()
 
    call finalize_horizontal_data()
@@ -513,6 +517,7 @@ program magic
 
    call tscheme%finalize()
    call finalize_output()
+   call finalize_output_data()
 
    if ( rank == 0 .and. (.not. l_save_out) )  close(n_log_file)
 

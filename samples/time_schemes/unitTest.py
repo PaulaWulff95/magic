@@ -62,52 +62,68 @@ class TimeSchemes(unittest.TestCase):
 
         os.chdir(self.dir)
         cmd = '%s %s/input_SBDF3.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_ARS222.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_ARS443.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_CNAB2.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_SBDF4.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_PC2.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_SBDF2.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_BPR353.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_MODCNAB.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_CNLF.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_LZ232.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_KC564.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_ARS343.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_CB3.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_KC564_FD.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = '%s %s/input_KC785_FD.nml' % (self.execCmd, self.dir)
-        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
+        sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'),
+                stderr=open(os.devnull, 'wb'))
 
         cmd = 'cat e_kin.sbdf3 e_kin.ars222 e_kin.ars443 e_kin.cnab2 e_kin.sbdf4 e_kin.pc2 e_kin.sbdf2 e_kin.bpr353 e_kin.modcnab e_kin.cnlf e_kin.lz232 e_kin.kc564 e_kin.ars343 e_kin.cb3 e_kin.kc564_fd e_kin.kc785_fd > e_kin.test'
         sp.call(cmd, shell=True, stdout=open(os.devnull, 'wb'))
@@ -154,8 +170,11 @@ class TimeSchemes(unittest.TestCase):
         print('Time used   :                            %s' % st)
 
         if hasattr(self, '_outcome'): # python 3.4+
-            result = self.defaultTestResult()
-            self._feedErrorsToResult(result, self._outcome.errors)
+            if hasattr(self._outcome, 'errors'):  # python 3.4-3.10
+                result = self.defaultTestResult()
+                self._feedErrorsToResult(result, self._outcome.errors)
+            else:  # python 3.11+
+                result = self._outcome.result
         else:  # python 2.7-3.3
             result = getattr(self, '_outcomeForDoCleanups', 
                              self._resultForDoCleanups)

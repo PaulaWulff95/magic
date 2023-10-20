@@ -53,6 +53,8 @@ def to_json(o, level=0):
             ret += '{:.8g}'.format(o)
     elif isinstance(o, np.ndarray) and np.issubdtype(o.dtype, np.integer):
         ret += "[" + ','.join(map(str, o.flatten().tolist())) + "]"
+    elif isinstance(o, np.ndarray) and np.issubdtype(o.dtype, np.bool_):
+        ret += "[" + ','.join(map(lambda x: '"{}"'.format(x), o.flatten().tolist())) + "]"
     elif isinstance(o, np.ndarray) and np.issubdtype(o.dtype, np.str):
         ret += "[" + ','.join(map(lambda x: '"{}"'.format(x), o.flatten().tolist())) + "]"
     elif isinstance(o, np.ndarray) and np.issubdtype(o.dtype, np.inexact):
@@ -165,6 +167,12 @@ class AvgField:
         self.lut['time_series'] = {}
         for k, key in enumerate(params['time_series'].keys()):
             ts = MagicTs(field=key, datadir=datadir, all=True, tag=tag, iplot=False)
+            # Number of columns has been possibly modified for those files
+            if key == 'par' or key == 'geos' or key == 'heat' or key == 'dtVrms' \
+               or key == 'phase':
+                fix = True
+            else:
+                fix = False
             if hasattr(ts, 'time'): # Manage to read file
                 mask = np.where(abs(ts.time-tstart) == min(abs(ts.time-tstart)), 1, 0)
                 ind = np.nonzero(mask)[0][0]
@@ -180,48 +188,88 @@ class AvgField:
                         if std and field != 'dt':
                             xmean, xstd = avgField(ts.time[ind:],
                                                    ts.__dict__[field][ind:],
-                                                   std=True)
+                                                   std=True,
+                                                   fix_missing_series=fix)
                             self.lut['time_series'][field+'_av'] = xmean
                             self.lut['time_series'][field+'_sd'] = xstd
                             setattr(self, field+'_av', xmean)
                             setattr(self, field+'_sd', xstd)
                         else:
-                            xmean = avgField(ts.time[ind:], ts.__dict__[field][ind:])
+                            xmean = avgField(ts.time[ind:],
+                                             ts.__dict__[field][ind:],
+                                             fix_missing_series=fix)
                             self.lut['time_series'][field+'_av'] = xmean
                             setattr(self, field+'_av', xmean)
+            else:  # If parameters is absent then put it to -1
+                for field in params['time_series'][key]:
+                    self.lut['time_series'][field+'_av'] = -1
+                    setattr(self, field+'_av', -1)
+                    if std:
+                        self.lut['time_series'][field+'_sd'] = -1
+                        setattr(self, field+'_sd', -1)
+
 
         # Get tags involved in averaging for spectra and radial profiles
         tags = self.get_tags(tstart)
 
         # Handle spectra
         self.lut['spectra'] = {}
-        for key in params['spectra'].keys():
-            sp = MagicSpectrum(field=key, datadir=datadir, iplot=False, tags=tags,
-                               quiet=True)
-            if hasattr(sp, 'index'): # Manage to read file
-                self.lut['spectra']['index'] = sp.index
+        # Determine whether file exists
+        if len(tags) > 0:
+            file_exists = True
+            # If only one tag is retained but averaged file does not exist yet
+            if len(tags) == 1:
+                file = os.path.join(datadir, 'kin_spec_ave.' + tags[-1])
+                if not os.path.exists(file):
+                    file_exists = False
+        else:
+            file_exists = False
+
+        if file_exists:
+            for key in params['spectra'].keys():
+                sp = MagicSpectrum(field=key, datadir=datadir, iplot=False, tags=tags,
+                                   quiet=True)
+                if hasattr(sp, 'index'): # Manage to read file
+                    self.lut['spectra']['index'] = sp.index
+                    for field in params['spectra'][key]:
+                        if hasattr(sp, field):
+                            self.lut['spectra'][field+'_spec_av'] = sp.__dict__[field]
+                            if std and hasattr(sp, field + '_SD'):
+                                self.lut['spectra'][field+'_spec_sd'] = \
+                                    sp.__dict__[field + '_SD']
+        else:  # Set parameters to -1
+            for key in params['spectra'].keys():
+                self.lut['spectra']['index'] = -1 * np.ones(32)
                 for field in params['spectra'][key]:
-                    if hasattr(sp, field):
-                        self.lut['spectra'][field+'_av'] = sp.__dict__[field]
-                        if std and hasattr(sp, field + '_SD'):
-                            self.lut['spectra'][field+'_sd'] = \
-                                sp.__dict__[field + '_SD']
+                    self.lut['spectra'][field+'_spec_av'] = -1 * np.ones(32)
+                    if std:
+                        self.lut['spectra'][field+'_spec_sd'] = -1 * np.ones(32)
 
         # Handle radial profiles
         self.lut['radial_profiles'] = {}
-        for key in params['radial_profiles'].keys():
-            rr = MagicRadial(field=key, datadir=datadir, iplot=False, tags=tags,
-                             quiet=True)
-            if hasattr(rr, 'radius'): # Manage to read file
-                self.lut['radial_profiles']['radius'] = rr.radius
+        if len(tags) > 0:
+            for key in params['radial_profiles'].keys():
+                rr = MagicRadial(field=key, datadir=datadir, iplot=False, tags=tags,
+                                 quiet=True)
+                if hasattr(rr, 'radius'): # Manage to read file
+                    self.lut['radial_profiles']['radius'] = rr.radius
+                    for field in params['radial_profiles'][key]:
+                        if hasattr(rr, field):
+                            self.lut['radial_profiles'][field+'_av'] = rr.__dict__[field]
+                            setattr(self, field+'R_av', rr.__dict__[field])
+                            if std and hasattr(rr, field + '_SD'):
+                                self.lut['radial_profiles'][field+'_sd'] = \
+                                    rr.__dict__[field + '_SD']
+                                setattr(self, field+'R_sd', rr.__dict__[field+'_SD'])
+        else:  # Set parameters to -1
+            for key in params['radial_profiles'].keys():
+                self.lut['radial_profiles']['radius'] = -1 * np.ones(33)
                 for field in params['radial_profiles'][key]:
-                    if hasattr(rr, field):
-                        self.lut['radial_profiles'][field+'_av'] = rr.__dict__[field]
-                        setattr(self, field+'R_av', rr.__dict__[field])
-                        if std and hasattr(rr, field + '_SD'):
-                            self.lut['radial_profiles'][field+'_sd'] = \
-                                rr.__dict__[field + '_SD']
-                            setattr(self, field+'R_sd', rr.__dict__[field+'_SD'])
+                    self.lut['radial_profiles'][field+'_av'] = -1 * np.ones(33)
+                    setattr(self, field+'R_av', rr.__dict__[field])
+                    if std and hasattr(rr, field + '_SD'):
+                        self.lut['radial_profiles'][field+'_sd'] = -1 * np.ones(33)
+                        setattr(self, field+'R_sd', rr.__dict__[field+'_SD'])
 
         # Write a json file
         if write:
@@ -349,6 +397,10 @@ class AvgStack:
                         a = AvgField(model=model, std=std)
                     if not hasattr(self, 'lut'):
                         self.lut = self.load()
+                        keys = ['spectra', 'radial_profiles']
+                        for key in keys:
+                            for key1 in self.lut[key].keys():
+                                self.lut[key][key1] = [np.atleast_1d(self.lut[key][key1])]
                     else:
                         lut = self.load()
                         self.merge(lut)
@@ -361,18 +413,53 @@ class AvgStack:
 
         self.simple_namespace()
 
+    def __add__(self, new):
+        """
+        This routine is used to add two AvgStack objects.
+
+        :param new: the lookup table which needs to be added
+        :type new: AvgStack
+        """
+        keys = ['phys_params', 'num_params', 'time_series']
+        for key in keys:
+            if key in new.lut.keys() and key in self.lut.keys():
+                for key1 in self.lut[key].keys():
+                    if key1 in new.lut[key].keys():
+                        arr = np.atleast_1d(self.lut[key][key1])
+                        arr1 = np.atleast_1d(new.lut[key][key1])
+                        self.lut[key][key1] = np.concatenate((arr, arr1))
+
+        keys = ['spectra', 'radial_profiles']
+        for key in keys:
+            if key in new.lut.keys() and key in self.lut.keys():
+                for key1 in self.lut[key].keys():
+                    if key1 in new.lut[key].keys():
+                        for lst in new.lut[key][key1]:
+                            arr1 = np.atleast_1d(lst)
+                            self.lut[key][key1].append(arr1)
+
+        self.simple_namespace()
+
+        return self
+
     def simple_namespace(self):
         """
         This routine creates a simpler namespace from the lookup table
         """
-
         keys = ['phys_params', 'num_params', 'time_series']
-
         for key in keys:
             if key in self.lut.keys():
                 for key1 in self.lut[key].keys():
                     setattr(self, key1, np.atleast_1d(self.lut[key][key1]))
 
+        keys = ['spectra', 'radial_profiles']
+        for key in keys:
+            if key in self.lut.keys():
+                for key1 in self.lut[key].keys():
+                    g = []
+                    for ff in self.lut[key][key1]:
+                        g.append(np.atleast_1d(ff))
+                    setattr(self, key1, g)
 
     def merge(self, newlut):
         """
@@ -389,6 +476,17 @@ class AvgStack:
                         arr = np.atleast_1d(self.lut[key][key1])
                         arr1 = np.atleast_1d(newlut[key][key1])
                         self.lut[key][key1] = np.concatenate((arr, arr1))
+
+        keys = ['spectra', 'radial_profiles']
+        for key in keys:
+            if key in newlut.keys() and key in self.lut.keys():
+                for key1 in self.lut[key].keys():
+                    if key1 in newlut[key].keys():
+                        arr1 = np.atleast_1d(newlut[key][key1])
+                        self.lut[key][key1].append(arr1)
+                    else: #  Fill with -1 dummy arrays to make sure everything has the right size
+                        arr1 = -1 * np.ones(32)
+                        self.lut[key][key1].append(arr1)
 
     def load(self):
         """

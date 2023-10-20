@@ -20,7 +20,7 @@ if buildSo:
 else:
     zavgMode = 'python'
 
-def sph2cyl_plane(data, rad, ns, nz):
+def sph2cyl_plane(data, rad, ns):
     """
     This function extrapolates a phi-slice of a spherical shell on
     a cylindrical grid
@@ -40,8 +40,6 @@ def sph2cyl_plane(data, rad, ns, nz):
     :type rad: numpy.ndarray
     :param ns: number of grid points in s direction
     :type ns: int
-    :param nz: number of grid points in z direction
-    :type nz: int
     :returns: a python tuple that contains two numpy.ndarray and a list (S,Z,output).
               S[nz,ns] is a meshgrid that contains the radial coordinate.
               Z[nz,ns] is a meshgrid that contains the vertical coordinate.
@@ -50,39 +48,53 @@ def sph2cyl_plane(data, rad, ns, nz):
     :rtype: tuple
     """
     ntheta, nr = data[0].shape
-
-    radius = rad[::-1]
-
     theta = np.linspace(0., np.pi, ntheta)
+    nz = 2*ns
 
-    Z, S = np.mgrid[-radius.max():radius.max():nz*1j,0:radius.max():ns*1j]
+    if zavgMode == 'f2py':
 
-    new_r = np.sqrt(S**2+Z**2).ravel()
-    new_theta = np.arctan2(S, Z).ravel()
-    ir = interp1d(radius, np.arange(len(radius)), bounds_error=False)
-    it = interp1d(theta, np.arange(len(theta)), bounds_error=False)
+        cylRad = np.linspace(0., rad[0], ns)
+        output = []
+        for dat in data:
+            Z, dat_cyl = sph_to_cyl(dat, rad, cylRad, theta)
+            output.append(dat_cyl)
 
-    new_ir = ir(new_r)
-    new_it = it(new_theta)
-    new_ir[new_r > radius.max()] = len(radius)-1.
-    new_ir[new_r < radius.min()] = 0.
+        return cylRad, Z, output
 
-    coords = np.array([new_it, new_ir])
+    else:
 
-    output = []
-    for dat in data:
-        dat_cyl = map_coordinates(dat[:, ::-1], coords, order=3)
-        dat_cyl[new_r > radius.max()] = 0.
-        dat_cyl[new_r < radius.min()] = 0.
-        dat_cyl = dat_cyl.reshape((nz, ns))
-        output.append(dat_cyl)
+        radius = rad[::-1]
 
-    return Z, S, output
+        theta = np.linspace(0., np.pi, ntheta)
+
+        Z, S = np.mgrid[-radius.max():radius.max():nz*1j,0:radius.max():ns*1j]
+
+        new_r = np.sqrt(S**2+Z**2).ravel()
+        new_theta = np.arctan2(S, Z).ravel()
+        ir = interp1d(radius, np.arange(len(radius)), bounds_error=False)
+        it = interp1d(theta, np.arange(len(theta)), bounds_error=False)
+
+        new_ir = ir(new_r)
+        new_it = it(new_theta)
+        new_ir[new_r > radius.max()] = len(radius)-1.
+        new_ir[new_r < radius.min()] = 0.
+
+        coords = np.array([new_it, new_ir])
+
+        output = []
+        for dat in data:
+            dat_cyl = map_coordinates(dat[:, ::-1], coords, order=3)
+            dat_cyl[new_r > radius.max()] = 0.
+            dat_cyl[new_r < radius.min()] = 0.
+            dat_cyl = dat_cyl.reshape((nz, ns))
+            output.append(dat_cyl)
+
+        return S, Z, output
 
 if zavgMode == 'f2py':
 
     def zavg(input, radius, ns, minc, save=True, filename='vp.pickle',
-             normed=True):
+             normed=True, colat=None):
         """
         This function computes a z-integration of a list of input arrays 
         (on the spherical grid). This works well for 2-D (phi-slice) arrays.
@@ -105,6 +117,8 @@ if zavgMode == 'f2py':
         :param normed: a boolean to specify if ones wants to simply integrate 
                        over z or compute a z-average (default is True: average)
         :type normed: bool
+        :param colat: an optional array containing the colatitudes
+        :type colat: numpy.ndarray
         :returns: a python tuple that contains two numpy.ndarray and a list
                   (height,cylRad,output) height[ns] is the height of the
                   spherical shell for all radii. cylRad[ns] is the cylindrical
@@ -119,7 +133,10 @@ if zavgMode == 'f2py':
             ntheta = input[0].shape[1]
         elif len(input[0].shape) == 2:
             ntheta = input[0].shape[0]
-        theta = np.linspace(0., np.pi, ntheta)
+        if colat is None:
+            theta = np.linspace(0., np.pi, ntheta)
+        else:
+            theta = colat
 
         height = np.zeros_like(cylRad)
         height[cylRad >= ri] = 2.*np.sqrt(ro**2-cylRad[cylRad >= ri]**2)
@@ -139,7 +156,7 @@ if zavgMode == 'f2py':
             if save:
                 nphi, ntheta, nr = input[0].shape
                 file = open(filename, 'wb')
-                pickle.dump([cylRad, phi, output], file) # cylindrical average
+                pickle.dump([height, cylRad, phi, output], file) # cylindrical average
                 pickle.dump([radius, phi, input[0][:, ntheta//2, :]], file) # equatorial cut
                 file.close()
             return height, cylRad, phi, output
@@ -214,8 +231,7 @@ else:
             phi = np.linspace(0., 2.*np.pi/minc, nphi)
             output = np.zeros((nphi, ns-2), dtype=input[0].dtype)
             for iphi in progressbar(range(nphi)):
-                Z, S, out2D = sph2cyl_plane([input[0][iphi, ...]], radius, ns,
-                                            nz)
+                Z, S, out2D = sph2cyl_plane([input[0][iphi, ...]], radius, ns)
                 S = S[:, 1:-1]
                 Z = Z[:, 1:-1]
                 output[iphi, :] = np.trapz(out2D[0][:, 1:-1], z, axis=0)
@@ -230,7 +246,7 @@ else:
                 file.close()
             return height, cylRad, phi, output
         elif len(input[0].shape) == 2:
-            Z, S, out2D = sph2cyl_plane(input, radius, ns, nz)
+            Z, S, out2D = sph2cyl_plane(input, radius, ns)
             S = S[:, 1:-1]
             Z = Z[:, 1:-1]
             output = []
@@ -398,7 +414,7 @@ class Cyl(MagicSetup):
             beta[i, :] = beta0
         Z, S, [rho, beta] = sph2cyl_plane([rho,beta],
                                  np.linspace(self.ro, self.ri, self.ns),
-                                 self.ns, self.nz)
+                                 self.ns)
         self.rho = np.zeros_like(self.vs)
         self.beta = np.zeros_like(self.vs)
         for i in range(self.npI):

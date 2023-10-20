@@ -730,6 +730,8 @@ contains
 
       !-- Copy input array
       work_ghost(start_lm:stop_lm,nRstart:nRstop)=f_Rloc(start_lm:stop_lm,:)
+      if ( rank == 0 ) work_ghost(start_lm:stop_lm,nRstart-1)=zero
+      if ( rank == n_procs-1) work_ghost(start_lm:stop_lm,nRstop+1)=zero
       do n_r=1,r_scheme%order_boundary+1
          if (n_r >= nRstart .and. n_r <= nRstop) then
             ftop(start_lm:stop_lm,n_r)=f_Rloc(start_lm:stop_lm,n_r)
@@ -938,7 +940,7 @@ contains
    subroutine get_ddddr_ghost(f_Rloc, df_Rloc, ddf_Rloc, dddf_Rloc, ddddf_Rloc, &
               &               lm_max, start_lm, stop_lm, nRstart, nRstop, r_scheme)
       !
-      ! Purpose of this subroutine is to take the first and second
+      ! Purpose of this subroutine is to take the first, second, third and fourth
       ! radial derivatives of an input complex array distributed over radius that
       ! has the ghost zones properly filled.
       !

@@ -15,7 +15,6 @@ module magnetic_energy
    use physical_parameters, only: LFfac, kbotb, ktopb
    use num_param, only: eScale, tScale
    use blocking, only: st_map, lo_map, llmMag, ulmMag
-   use horizontal_data, only: dLh
    use logic, only: l_cond_ic, l_mag, l_mag_LF, l_save_out, l_earth_likeness, &
        &            l_full_sphere
    use movie_data, only: movieDipColat, movieDipLon, movieDipStrength, &
@@ -24,7 +23,7 @@ module magnetic_energy
    use constants, only: pi, zero, one, two, half, four, osq4pi
    use special, only: n_imp, rrMP
    use integration, only: rInt_R,rIntIC
-   use useful, only: cc2real,cc22real
+   use useful, only: cc2real, cc22real
    use plms_theta, only: plm_theta
    use communications, only: gather_from_lo_to_rank0, reduce_radial, &
        &                     reduce_scalar, send_lm_pair_to_master
@@ -105,7 +104,7 @@ contains
             do nTheta=1,n_theta_max_comp
                theta = pi*(nTheta-half)/real(n_theta_max_comp,cp)
                !-- Schmidt normalisation --!
-               call plm_theta(theta, l_max_comp, l_max_comp, minc, &
+               call plm_theta(theta, l_max_comp, 0, l_max_comp, minc, &
                     &         plma, dtheta_plma, lm_max_comp, 1)
                lm = 1
                do m=0,l_max_comp,minc
@@ -279,15 +278,15 @@ contains
             l=lo_map%lm2l(lm)
             m=lo_map%lm2m(lm)
 
-            e_p_temp= dLh(st_map%lm2(l,m))*( dLh(st_map%lm2(l,m))*    &
+            e_p_temp= real(l*(l+1),cp)*( real(l*(l+1),cp)*            &
             &                            or2(nR)*cc2real( b(lm,nR),m) &
             &                                  + cc2real(db(lm,nR),m) )
-            e_t_temp= dLh(st_map%lm2(l,m)) * cc2real(aj(lm,nR),m)
+            e_t_temp= real(l*(l+1),cp) * cc2real(aj(lm,nR),m)
 
             if ( m == 0 ) then  ! axisymmetric part
                e_p_as_r(nR)=e_p_as_r(nR) + e_p_temp
                e_t_as_r(nR)=e_t_as_r(nR) + e_t_temp
-               if ( mod(l,2) == 1 ) then
+               if ( mod(l,2) == 1 ) then ! equatorially-asymmetric part
                   e_p_eas_r(nR)=e_p_eas_r(nR)+e_p_temp
                else
                   e_t_eas_r(nR)=e_t_eas_r(nR)+e_t_temp
@@ -296,7 +295,7 @@ contains
                e_p_r(nR)=e_p_r(nR) + e_p_temp
                e_t_r(nR)=e_t_r(nR) + e_t_temp
             end if
-            if ( mod(l+m,2) == 1 ) then
+            if ( mod(l+m,2) == 1 ) then ! equatorially-asymmetric part
                e_p_es_r(nR)=e_p_es_r(nR) + e_p_temp
             else
                e_t_es_r(nR)=e_t_es_r(nR) + e_t_temp
@@ -324,9 +323,9 @@ contains
 
                if ( nR ==  n_r_cmb .and. l >= 2 .and. l <= l_max_comp ) then
                   if ( mod(l+m,2) == 1 ) then
-                     sym = sym + e_p_temp
+                     asym = asym + e_p_temp
                   else
-                     asym = asym+e_p_temp
+                     sym = sym + e_p_temp
                   end if
                   if ( m == 0 ) then
                      zon = zon + e_p_temp
@@ -416,7 +415,7 @@ contains
             e_tA(n_r_max)   =0.0_cp
             e_t_asA(n_r_max)=0.0_cp
          endif
-         if ( l_stop_time ) then
+         if ( l_stop_time .and. n_e_sets > 1 ) then
             fac=half*LFfac*eScale
             filename='eMagR.'//tag
             open(newunit=fileHandle, file=filename, status='unknown')
@@ -504,11 +503,11 @@ contains
                m=lo_map%lm2m(lm)
                r_dr_b=r_ic(nR)*db_ic(lm,nR)
 
-               e_p_temp=dLh(st_map%lm2(l,m))*O_r_icb_E_2*r_ratio**(2*l) * (     &
+               e_p_temp=real(l*(l+1),cp)*O_r_icb_E_2*r_ratio**(2*l) * (         &
                &           real((l+1)*(2*l+1),cp)*cc2real(b_ic(lm,nR),m)     +  &
                &           real(2*(l+1),cp)*cc22real(b_ic(lm,nR),r_dr_b,m)   +  &
                &                              cc2real(r_dr_b,m)            )
-               e_t_temp=dLh(st_map%lm2(l,m))*r_ratio**(2*l+2)*cc2real(aj_ic(lm,nR),m)
+               e_t_temp=real(l*(l+1),cp)*r_ratio**(2*l+2)*cc2real(aj_ic(lm,nR),m)
 
                if ( m == 0 ) then  ! axisymmetric part
                   e_p_as_ic_r(nR)=e_p_as_ic_r(nR) + e_p_temp
@@ -716,8 +715,8 @@ contains
                else
                   ad=0.0_cp
                end if
-               if ( asym_global /= 0.0_cp ) then
-                  sym=sym_global/asym_global
+               if ( sym_global /= 0.0_cp ) then
+                  sym=asym_global/sym_global
                else
                   sym=0.0_cp
                end if

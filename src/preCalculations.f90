@@ -1,4 +1,9 @@
 module preCalculations
+   !
+   ! This module is used to handle some pre-calculations of constants (moment of inertia,
+   ! mass, volumes), determine the timesteps for I/O and fix boundary values for
+   ! temperature/entropy and chemical composition
+   !
 
    use iso_fortran_env, only: output_unit
    use constants
@@ -6,18 +11,20 @@ module preCalculations
    use output_data
    use precision_mod
    use truncation, only: n_r_max, l_max, minc, n_r_ic_max, nalias, &
-       &                 n_cheb_ic_max, m_max, n_cheb_max,         &
+       &                 n_cheb_ic_max, m_max, n_cheb_max, m_min,  &
        &                 lm_max, n_phi_max, n_theta_max
    use init_fields, only: bots, tops, s_bot, s_top, n_s_bounds,    &
        &                  l_reset_t, topxi, botxi, xi_bot, xi_top, &
-       &                  n_xi_bounds
-   use parallel_mod, only: rank
+       &                  n_xi_bounds, omega_ma1, omegaOsz_ma1,    &
+       &                  omega_ic1, omegaOsz_ic1
+   use parallel_mod, only: rank, n_procs, rank_with_r_LCR
    use logic, only: l_mag, l_cond_ic, l_non_rot, l_mag_LF, l_newmap,     &
        &            l_anel, l_heat, l_anelastic_liquid,                  &
        &            l_cmb_field, l_save_out, l_TO, l_TOmovie, l_r_field, &
        &            l_movie, l_LCR, l_dt_cmb_field, l_non_adia,          &
        &            l_temperature_diff, l_chemical_conv, l_probe,        &
        &            l_precession, l_finite_diff, l_full_sphere
+   use radial_data, only: radial_balance
    use radial_functions, only: rscheme_oc, temp0, r_CMB, ogrun,            &
        &                       r_surface, visc, or2, r, r_ICB, dLtemp0,    &
        &                       beta, rho0, rgrav, dbeta, alpha0,           &
@@ -30,13 +37,13 @@ module preCalculations
        &                          PolInd, nVarCond, nVarDiff, nVarVisc,    &
        &                          rho_ratio_ic, rho_ratio_ma, epsc, epsc0, &
        &                          ktops, kbots, interior_model, r_LCR,     &
-       &                          n_r_LCR, mode, tmagcon, oek, Bn,         &
+       &                          n_r_LCR, mode, tmagcon, oek, Bn, imagcon,&
        &                          ktopxi, kbotxi, epscxi, epscxi0, sc, osc,&
        &                          ChemFac, raxi, Po, prec_angle, nVarEntropyGrad
    use horizontal_data, only: horizontal
    use integration, only: rInt_R
    use useful, only: logWrite, abortRun
-   use special, only: l_curr, fac_loop, loopRadRatio, amp_curr, Le
+   use special, only: l_curr, fac_loop, loopRadRatio, amp_curr, Le, n_imp, l_imp
    use time_schemes, only: type_tscheme
 
    implicit none
@@ -62,7 +69,7 @@ contains
       real(cp) :: xir_top,xii_top,xir_bot,xii_bot
       real(cp) :: topconduc, botconduc
       integer :: n,n_r,l,m,l_bot,m_bot,l_top,m_top
-      integer :: fileHandle
+      integer :: fileHandle, p
       character(len=76) :: fileName
       character(len=80) :: message
       real(cp) :: mom(n_r_max)
@@ -180,26 +187,14 @@ contains
 
       call radial()
 
-      if ( ( l_newmap ) .and. (rank == 0) ) then
-         fileName='rNM.'//tag
-         open(newunit=fileHandle, file=fileName, status='unknown')
-         do n_r=1,n_r_max
-            write(fileHandle,'(I4,4ES16.8)') n_r, r(n_r)-r_icb,   &
-            &                                rscheme_oc%drx(n_r), &
-            &                                rscheme_oc%ddrx(n_r),&
-            &                                rscheme_oc%dddrx(n_r)
-         end do
-         close(fileHandle)
-      end if
-
-      call transportProperties
+      call transportProperties()
 
       if ( ( l_anel .or. l_non_adia .or. nVarEntropyGrad == 6 .or. nVarEntropyGrad == 7 .or. nVarEntropyGrad == 8) .and. ( rank == 0 ) ) then
          ! Write the equilibrium setup in anel.tag
          fileName='anel.'//tag
          open(newunit=fileHandle, file=fileName, status='unknown')
-         write(fileHandle,'(11a15)') 'radius', 'temp0', 'rho0', 'beta',         &
-         &                          'dbeta', 'grav', 'ds0/dr', 'div(k grad T)', &
+         write(fileHandle,'(11a15)') 'radius', 'temp0', 'rho0', 'beta',       &
+         &                          'dbeta', 'grav', 'ds0/dr', 'div(kgradT)', &
          &                          'alpha', 'ogrun', 'dLtemp0'
          do n_r=1,n_r_max
             write(fileHandle,'(11ES16.8)') r(n_r), temp0(n_r), rho0(n_r),    &
@@ -271,6 +266,16 @@ contains
       if ( n_r_LCR == 1 ) then
          l_LCR=.false.
          n_r_LCR=0
+      end if
+
+      if ( l_LCR ) then ! Determine which ranks carries the radius with n_r_LCR
+         do p=0,n_procs-1
+            if ( radial_balance(p)%nStart <= n_r_LCR .and. &
+            &    radial_balance(p)%nStop >= n_r_LCR ) then
+               rank_with_r_LCR=p
+               exit
+            end if
+         end do
       end if
 
       !-- Compute some constants:
@@ -406,13 +411,13 @@ contains
 
          if ( ktops == 1 .and. kbots == 1 ) then ! Fixed entropy
 
-            tops(0,0)=-r_icb**2/(r_icb**2+r_cmb**2)*sq4pi
-            bots(0,0)= r_cmb**2/(r_icb**2+r_cmb**2)*sq4pi
+            tops(0,0)=0.0_cp
+            bots(0,0)=sq4pi
 
          else if ( ktops == 3 .and. kbots == 3 ) then ! Fixed temperature contrast
 
-            tops(0,0)=-r_icb**2/(r_icb**2+r_cmb**2)*sq4pi
-            bots(0,0)= r_cmb**2/(r_icb**2+r_cmb**2)*sq4pi
+            tops(0,0)=0.0_cp
+            bots(0,0)=sq4pi
 
          else if ( (ktops==2 .and. kbots==2) .or. (ktops == 4 .and. kbots==4) ) then
 
@@ -446,8 +451,7 @@ contains
                      call abortRun('Stop run in preCalc')
                   end if
                   bots(0,0)=epsc*pr*facIH/(four*pi*r_icb**2 * botconduc )
-                  call logWrite( &
-                       '! CMB heat flux set to balance volume sources!')
+                  call logWrite('! CMB heat flux set to balance volume sources!')
 
                else if ( tops(0,0) /= 0.0_cp .and. bots(0,0) == 0.0_cp ) then
 
@@ -461,11 +465,11 @@ contains
                   end if
                   help=real(tops(0,0))
                   if ( abs(real(tops(0,0))) == sq4pi ) &
-                       call logWrite('! You intend to use the CMB flux as buoy. scale??')
+                  &    call logWrite('! You intend to use the CMB flux as buoy. scale??')
                   tops(0,0)=-facIH*epsc*pr/(four*pi*r_cmb**2) + &
-                            radratio**2*botconduc*bots(0,0)
-                  if ( real(tops(0,0)) /= help ) call logWrite( &
-                       '!!!! WARNING: CMB heat flux corrected !!!!')
+                  &          radratio**2*botconduc*bots(0,0)
+                  if ( real(tops(0,0)) /= help ) &
+                     call logWrite('!!!! WARNING: CMB heat flux corrected !!!!')
 
                else if ( tops(0,0) /= 0.0_cp .and. bots(0,0) /= 0.0_cp ) then
 
@@ -477,9 +481,9 @@ contains
                      write(output_unit,*) '! epsc0>0.                        '
                      call abortRun('Stop run in preCalc')
                   end if
-                  help=four*pi*opr*facIH *            &
-                       (r_icb**2*real(bots(0,0))*botconduc - &
-                        r_cmb**2*real(tops(0,0))*topconduc)
+                  help=four*pi*opr*facIH *                   &
+                  &    (r_icb**2*real(bots(0,0))*botconduc - &
+                  &     r_cmb**2*real(tops(0,0))*topconduc)
                   if ( help /= epsc ) then
                      write(output_unit,*) '! NOTE: when flux BC through the '
                      write(output_unit,*) '! ICB and CMB are used the sources '
@@ -490,21 +494,20 @@ contains
                end if
 
             else if ( epsc0 == 0.0_cp .and. ( tops(0,0) /= 0.0_cp .or. &
-                                            bots(0,0) /= 0.0_cp ) ) then
+            &                               bots(0,0) /= 0.0_cp ) ) then
                !--- Correct epsc0 to balance the difference between
                !    flux through the inner and outer boundary:
-               epsc=four*pi/pr/facIH *          &
-                    (r_icb**2*real(bots(0,0))*botconduc - &
-                     r_cmb**2*real(tops(0,0))*topconduc)
-               call logWrite( &
-                    '! Sources introduced to balance surface heat flux!')
+               epsc=four*pi/pr/facIH *                    &
+               &    (r_icb**2*real(bots(0,0))*botconduc - &
+               &     r_cmb**2*real(tops(0,0))*topconduc)
+               call logWrite('! Sources introduced to balance surface heat flux!')
                write(message,'(''!      epsc0='',ES16.6)') epsc/sq4pi
                call logWrite(message)
             else if ( epsc0 /= 0.0_cp .and. tops(0,0) /= 0.0_cp .and. &
-                                          bots(0,0) /= 0.0_cp ) then
-               help=four*pi/pr/facIH *          &
-                    (r_icb**2*real(bots(0,0))*botconduc - &
-                     r_cmb**2*real(tops(0,0))*topconduc)
+            &                             bots(0,0) /= 0.0_cp ) then
+               help=four*pi/pr/facIH *                    &
+               &    (r_icb**2*real(bots(0,0))*botconduc - &
+               &     r_cmb**2*real(tops(0,0))*topconduc)
                if ( help /= epsc ) then
                   write(output_unit,*) '! NOTE: when flux BC through the '
                   write(output_unit,*) '! ICB and/or CMB is used the sources '
@@ -525,34 +528,40 @@ contains
          end if
          if ( ktops == 1 ) then
             write(message,'(''! Const. entropy at outer boundary S ='',ES16.6)') &
-                  real(tops(0,0))/sq4pi
+            &     real(tops(0,0))/sq4pi
             call logWrite(message)
          else if ( ktops == 2 ) then
             help=surf_cmb*topconduc*real(tops(0,0))/sq4pi
-            write(message,'(''! Const. total outer boundary entropy flux    ='',ES16.6)') help
+            write(message,'(''! Const. total outer boundary entropy flux    ='',ES16.6)') &
+            &     help
             call logWrite(message)
          else if ( ktops == 3 ) then
             write(message,'(''! Const. temp. at outer boundary S ='',ES16.6)') &
-                  real(tops(0,0))/sq4pi
+            &     real(tops(0,0))/sq4pi
             call logWrite(message)
          else if ( ktops == 4 ) then
             help=surf_cmb*topconduc*real(tops(0,0))/sq4pi
-            write(message,'(''! Const. total outer boundary temp. flux    ='',ES16.6)') help
+            write(message,'(''! Const. total outer boundary temp. flux    ='',ES16.6)') &
+            &     help
             call logWrite(message)
          end if
          if ( kbots == 1 ) then
-            write(message,'(''! Const. entropy at inner boundary S ='',ES16.6)') real(bots(0,0))/sq4pi
+            write(message,'(''! Const. entropy at inner boundary S ='',ES16.6)') &
+            &     real(bots(0,0))/sq4pi
             call logWrite(message)
          else if ( kbots == 2 ) then
             help=surf_cmb*radratio**2*botconduc*real(bots(0,0))/sq4pi
-            write(message, '(''! Const. total inner boundary entropy flux    ='',ES16.6)') help
+            write(message, '(''! Const. total inner boundary entropy flux    ='',ES16.6)')&
+            &     help
             call logWrite(message)
          else if ( kbots == 3 ) then
-            write(message,'(''! Const. temp. at inner boundary S ='',ES16.6)') real(bots(0,0))/sq4pi
+            write(message,'(''! Const. temp. at inner boundary S ='',ES16.6)') &
+            &     real(bots(0,0))/sq4pi
             call logWrite(message)
          else if ( kbots == 4 ) then
             help=surf_cmb*radratio**2*botconduc*real(bots(0,0))/sq4pi
-            write(message, '(''! Const. total inner boundary temp. flux    ='',ES16.6)') help
+            write(message, '(''! Const. total inner boundary temp. flux    ='',ES16.6)') &
+            &     help
             call logWrite(message)
          end if
          help=facIH*pr*epsc/sq4pi
@@ -600,8 +609,8 @@ contains
 
          if ( ktopxi == 1 .and. kbotxi == 1 ) then ! Fixed chemical comp
 
-            topxi(0,0)=-r_icb**2/(r_icb**2+r_cmb**2)*sq4pi
-            botxi(0,0)= r_cmb**2/(r_icb**2+r_cmb**2)*sq4pi
+            topxi(0,0)=0.0_cp
+            botxi(0,0)=sq4pi
 
          else if ( (ktopxi==2 .and. kbotxi==2) ) then
 
@@ -631,8 +640,7 @@ contains
                      call abortRun('Stop run in preCalc')
                   end if
                   botxi(0,0)=epscxi*sc*facIH/(four*pi*r_icb**2*botconduc)
-                  call logWrite( &
-                       '! CMB heat flux set to balance volume sources!')
+                  call logWrite('! CMB heat flux set to balance volume sources!')
 
                else if ( topxi(0,0) /= 0.0_cp .and. botxi(0,0) == 0.0_cp ) then
 
@@ -645,11 +653,11 @@ contains
                      call abortRun('Stop run in preCalc')
                   end if
                   if ( abs(real(topxi(0,0))) == sq4pi ) &
-                       call logWrite('! You intend to use the CMB flux as buoy. scale??')
+                  &    call logWrite('! You intend to use the CMB flux as buoy. scale??')
                   topxi(0,0)=-facIH*epscxi*sc/(four*pi*r_cmb**2) + &
-                       radratio**2*botxi(0,0)*botconduc
-                  if ( topxi(0,0) /= help ) call logWrite( &
-                       '!!!! WARNING: CMB composition flux corrected !!!!')
+                  &          radratio**2*botxi(0,0)*botconduc
+                  if ( topxi(0,0) /= help ) &
+                     call logWrite('!!!! WARNING: CMB composition flux corrected !!!!')
 
                else if ( topxi(0,0) /= 0.0_cp .and. botxi(0,0) /= 0.0_cp ) then
 
@@ -661,9 +669,9 @@ contains
                      write(output_unit,*) '! epscxi0>0.                      '
                      call abortRun('Stop run in preCalc')
                   end if
-                  help=four*pi/sc/facIH *            &
-                       (r_icb**2*real(botxi(0,0))*botconduc - &
-                        r_cmb**2*real(topxi(0,0))*topconduc)
+                  help=four*pi/sc/facIH *                     &
+                  &    (r_icb**2*real(botxi(0,0))*botconduc - &
+                  &     r_cmb**2*real(topxi(0,0))*topconduc)
                   if ( help /= epscxi ) then
                      write(output_unit,*) '! NOTE: when flux BC through the '
                      write(output_unit,*) '! ICB and CMB are used the sources '
@@ -678,17 +686,16 @@ contains
                !--- Correct epscxi0 to balance the difference between
                !    flux through the inner and outer boundary:
                epscxi=four*pi/sc/facIH *                     &
-                      (r_icb**2*real(botxi(0,0))*botconduc - &
-                       r_cmb**2*real(topxi(0,0))*topconduc)
-               call logWrite( &
-                    '! Sources introduced to balance surface Fickian flux!')
+               &      (r_icb**2*real(botxi(0,0))*botconduc - &
+               &       r_cmb**2*real(topxi(0,0))*topconduc)
+               call logWrite('! Sources introduced to balance surface Fickian flux!')
                write(message,'(''!      epscxi0='',ES16.6)') epscxi/sq4pi
                call logWrite(message)
             else if ( epscxi0 /= 0.0_cp .and. topxi(0,0) /= 0.0_cp .and. &
-                                          botxi(0,0) /= 0.0_cp ) then
+            &                             botxi(0,0) /= 0.0_cp ) then
                help=four*pi/sc/facIH *                     &
-                    (r_icb**2*real(botxi(0,0))*botconduc - &
-                     r_cmb**2*real(topxi(0,0))*topconduc)
+               &    (r_icb**2*real(botxi(0,0))*botconduc - &
+               &     r_cmb**2*real(topxi(0,0))*topconduc)
                if ( help /= epscxi ) then
                   write(output_unit,*) '! NOTE: when flux BC through the '
                   write(output_unit,*) '! ICB and/or CMB is used the sources '
@@ -701,7 +708,7 @@ contains
 
          if ( ktopxi == 1 ) then
             write(message,'(''! Constant comp. at CMB T ='',ES16.6)') &
-                  real(topxi(0,0))/sq4pi
+            &     real(topxi(0,0))/sq4pi
             call logWrite(message)
          else if ( ktopxi == 2 ) then
             help=surf_cmb*topconduc*real(topxi(0,0))/sq4pi
@@ -709,7 +716,8 @@ contains
             call logWrite(message)
          end if
          if ( kbotxi == 1 ) then
-            write(message,'(''! Constant comp. at ICB T ='',ES16.6)') real(botxi(0,0))/sq4pi
+            write(message,'(''! Constant comp. at ICB T ='',ES16.6)') &
+            &     real(botxi(0,0))/sq4pi
             call logWrite(message)
          else if ( kbotxi == 2 ) then
             help=surf_cmb*radratio**2*botconduc*real(botxi(0,0))/sq4pi
@@ -722,17 +730,12 @@ contains
 
       end if
 
-
       !--- Compute fac_loop for current carrying loop
-
       if ( l_curr ) then
-
          allocate(fac_loop(l_max))
 
          do l=1,l_max
-
             fac_loop(l)=0.0_cp
-
             if (mod(l,2)/=0) then
                if(l==1) then
                   fac_loop(l)= one
@@ -741,7 +744,6 @@ contains
                   &            real(l-1,kind=cp)
                end if
             end if
-
          end do
 
          if (l_non_rot) then
@@ -749,23 +751,44 @@ contains
          else
             amp_curr = Le * sqrt(prmag/ek)
          end if
-
       end if
 
+      if ( (n_imp == 3 .or. n_imp == 4 .or. n_imp == 7) .and. ( l_imp /= 1 ) ) then
+         call abortRun('l_imp /= 1 not implemented for this imposed field setup!')
+      end if
+
+      if ( ((imagcon /= 0) .or. l_curr .or. (n_imp > 1)) .and. l_LCR ) then
+         call abortRun('LCR not compatible with imposed field!')
+      end if
+
+      if ( ellipticity_cmb /= 0.0_cp ) then
+         ellip_fac_cmb=-two*r_cmb**3*ellipticity_cmb*omega_ma1*omegaOsz_ma1
+      else
+         ellip_fac_cmb=0.0_cp
+      end if
+
+      if ( ellipticity_icb /= 0.0_cp ) then
+         ellip_fac_icb=-two*r_icb**3*ellipticity_icb*omega_ic1*omegaOsz_ic1
+      else
+         ellip_fac_icb=0.0_cp
+      end if
 
    end subroutine preCalc
 !-------------------------------------------------------------------------------
-   subroutine preCalcTimes(time,n_time_step)
+   subroutine preCalcTimes(time,tEND,dt,n_time_step,n_time_steps)
       !
       !  Precalc. after time, time and dt has been read from startfile.
       !
 
       !-- Output variables
-      real(cp), intent(out) ::  time
-      integer,  intent(out) :: n_time_step
+      real(cp), intent(inout) :: time ! Current time
+      real(cp), intent(in) :: tEND ! Final requested time
+      real(cp), intent(in) :: dt ! Time step size
+      integer,  intent(inout) :: n_time_step ! Index of time loop
+      integer,  intent(in) :: n_time_steps ! Number of iterations
 
       !-- Local variables:
-      logical :: l_time
+      real(cp) :: time_span
 
       !----- Set time step:
       if ( l_reset_t ) then
@@ -776,99 +799,93 @@ contains
       !tmagcon=tmagcon+time
 
       !-- Get output times:
-      call get_hit_times(t_graph,n_time_hits,n_t_graph,l_time, &
-           &             t_graph_start,t_graph_stop,dt_graph,  &
-           &             n_graphs,n_graph_step,'graph',time,tScale)
+      call get_hit_times(t_graph,n_t_graph,t_graph_start,t_graph_stop,dt_graph,  &
+           &             n_graphs,n_graph_step,'graph',time,time_span,tScale)
 
-      call get_hit_times(t_pot,n_time_hits,n_t_pot,l_time, &
-           &             t_pot_start,t_pot_stop,dt_pot,    &
-           &             n_pots,n_pot_step,'pot',time,tScale)
+      call get_hit_times(t_pot,n_t_pot,t_pot_start,t_pot_stop,dt_pot,    &
+           &             n_pots,n_pot_step,'pot',time,time_span,tScale)
 
-      call get_hit_times(t_rst,n_time_hits,n_t_rst,l_time, &
-           &             t_rst_start,t_rst_stop,dt_rst,    &
-           &             n_rsts,n_rst_step,'rst',time,tScale)
+      call get_hit_times(t_rst,n_t_rst,t_rst_start,t_rst_stop,dt_rst,    &
+           &             n_rsts,n_rst_step,'rst',time,time_span,tScale)
 
-      call get_hit_times(t_log,n_time_hits,n_t_log,l_time, &
-           &             t_log_start,t_log_stop,dt_log,    &
-           &             n_logs,n_log_step,'log',time,tScale)
+      call get_hit_times(t_log,n_t_log,t_log_start,t_log_stop,dt_log,    &
+           &             n_logs,n_log_step,'log',time,time_span,tScale)
 
-      call get_hit_times(t_spec,n_time_hits,n_t_spec,l_time, &
-           &             t_spec_start,t_spec_stop,dt_spec,   &
-           &             n_specs,n_spec_step,'spec',time,tScale)
+      call get_hit_times(t_spec,n_t_spec,t_spec_start,t_spec_stop,dt_spec,  &
+           &             n_specs,n_spec_step,'spec',time,time_span,tScale)
 
       if ( l_probe ) then
          l_probe=.false.
-         call get_hit_times(t_probe,n_time_hits,n_t_probe,l_time, &
-              &             t_probe_start,t_probe_stop,dt_probe,  &
-              &             n_probe_out,n_probe_step,'probe',time,tScale)
-         if ( n_probe_out > 0 .or. n_probe_step > 0 .or. l_time ) l_probe= .true.
+         call get_hit_times(t_probe,n_t_probe,t_probe_start,t_probe_stop,dt_probe, &
+              &             n_probe_out,n_probe_step,'probe',time,time_span,tScale)
+         if ( n_probe_out > 0 .or. n_probe_step > 0 ) l_probe= .true.
       end if
 
       if ( l_cmb_field ) then
          l_cmb_field=.false.
-         call get_hit_times(t_cmb,n_time_hits,n_t_cmb,l_time,t_cmb_start, &
-              &             t_cmb_stop,dt_cmb,n_cmbs,n_cmb_step,'cmb',time,tScale)
-         if ( n_cmbs > 0 .or. n_cmb_step > 0 .or. l_time ) l_cmb_field= .true.
+         call get_hit_times(t_cmb,n_t_cmb,t_cmb_start,t_cmb_stop,dt_cmb,n_cmbs,&
+              &             n_cmb_step,'cmb',time,time_span,tScale)
+         if ( n_cmbs > 0 .or. n_cmb_step > 0 ) l_cmb_field= .true.
       end if
       l_dt_cmb_field=l_dt_cmb_field .and. l_cmb_field
 
       if ( l_r_field ) then
          l_r_field=.false.
-         call get_hit_times(t_r_field,n_time_hits,n_t_r_field,l_time,    &
-              &             t_r_field_start,t_r_field_stop,dt_r_field,   &
-              &             n_r_fields,n_r_field_step,'r_field',time,tScale)
-         if ( n_r_fields > 0 .or. n_r_field_step > 0 .or. l_time ) l_r_field= .true.
+         call get_hit_times(t_r_field,n_t_r_field,t_r_field_start,t_r_field_stop,&
+              &             dt_r_field,n_r_fields,n_r_field_step,'r_field',time, &
+              &             time_span,tScale)
+         if ( n_r_fields > 0 .or. n_r_field_step > 0 ) l_r_field= .true.
       end iF
 
       if ( l_movie ) then
-         call get_hit_times(t_movie,n_time_hits,n_t_movie,l_time,t_movie_start, &
-              &             t_movie_stop,dt_movie,n_movie_frames,n_movie_step,  &
-              &             'movie',time,tScale)
+         call get_hit_times(t_movie,n_t_movie,t_movie_start,t_movie_stop,dt_movie,&
+              &             n_movie_frames,n_movie_step,'movie',time,time_span,tScale)
       end if
 
       if ( l_TO ) then
          if ( n_TOs == 0 .and. n_t_TO == 0 ) n_TO_step=max(3,n_TO_step)
-         call get_hit_times(t_TO,n_time_hits,n_t_TO,l_time,t_TO_start,t_TO_stop, &
-              &             dt_TO,n_TOs,n_TO_step,'TO',time,tScale)
+         call get_hit_times(t_TO,n_t_TO,t_TO_start,t_TO_stop,dt_TO,n_TOs, &
+              &             n_TO_step,'TO',time,time_span,tScale)
       end if
 
       if ( l_TOmovie ) then
-         call get_hit_times(t_TOmovie,n_time_hits,n_t_TOmovie,l_time,t_TOmovie_start, &
-              &             t_TOmovie_stop,dt_TOmovie,n_TOmovie_frames,n_TOmovie_step,&
-              &             'TOmovie',time,tScale)
+         call get_hit_times(t_TOmovie,n_t_TOmovie,t_TOmovie_start,t_TOmovie_stop,&
+              &             dt_TOmovie,n_TOmovie_frames,n_TOmovie_step,'TOmovie',&
+              &             time,time_span,tScale)
       end if
 
    end subroutine preCalcTimes
 !-------------------------------------------------------------------------------
-   subroutine get_hit_times(t,n_t_max,n_t,l_t,t_start,t_stop,dt, &
-              &             n_tot,n_step,string,time,tScale)
+   subroutine get_hit_times(t,n_t,t_start,t_stop,dt,n_tot,n_step,string,time,&
+              &             time_span,tScale)
       !
       ! This subroutine checks whether any specific times t(*) are given
       ! on input. If so, it returns their number n_r and sets l_t to true.
-      ! If not, t(*) may also be defined by giving a time step dt or a
+      ! If not, t(:) may also be defined by giving a time step dt or a
       ! number n_tot of desired output times and ``t_stop>t_start``.
       !
 
       !-- Input variables:
-      integer,          intent(in) :: n_t_max    ! Dimension of t(*)
       real(cp),         intent(in) :: time       ! Time of start file
       real(cp),         intent(in) :: tScale     ! Scale unit for time
+      real(cp),         intent(in) :: time_span  ! Time interval
       character(len=*), intent(in) :: string
-      integer,  intent(inout) :: n_tot       ! No. of output (times) if no times defined
-      integer,  intent(inout) :: n_step      ! Ouput step in no. of time steps
-      real(cp), intent(inout) :: t(n_t_max)  ! Times for output
-      real(cp), intent(inout) :: t_start     ! Starting time for output
-      real(cp), intent(inout) :: t_stop      ! Stop time for output
-      real(cp), intent(inout) :: dt          ! Time step for output
+      integer,               intent(inout) :: n_tot   ! Number of output (times) if no times defined
+      integer,               intent(inout) :: n_step  ! Ouput step in no. of time steps
+      real(cp), allocatable, intent(inout) :: t(:)    ! Times for output
+      real(cp),              intent(inout) :: t_start ! Starting time for output
+      real(cp),              intent(inout) :: t_stop  ! Stop time for output
+      real(cp),              intent(inout) :: dt      ! Time step for output
 
       !-- Output variables
-      integer, intent(out) :: n_t        ! No. of output times
-      logical, intent(out) :: l_t        ! =.true. if output times are defined
+      integer,               intent(out) :: n_t  ! No. of output times
 
       !-- Local variables:
-      integer :: n         ! Counter
+      logical :: l_t
+      real(cp) :: tmp(size(t))
+      integer :: n, n_t_max
 
-
+      n_t_max = size(t)
       t_start=t_start/tScale
       t_stop =t_stop/tScale
       dt     =dt/tScale
@@ -884,38 +901,40 @@ contains
          end if
       end do
 
+      !-- Properly reallocate at the right size
+      if ( l_t ) then
+         tmp(:)=t(:)
+         deallocate(t)
+         allocate(t(n_t))
+         t(:)=tmp(1:n_t)
+      end if
+
       !-- Check times should be constructed:
       if ( t_start < time ) t_start=time
-      if ( .not. l_t .and. ( dt > 0.0_cp .or. &
-      &  ( n_tot > 0 .and. t_stop > t_start ) ) ) then
-
+      if ( .not. l_t .and. ( dt > 0.0_cp .or. ( n_tot > 0 .and. t_stop > t_start ) ) ) then
          if ( n_tot > 0 .and. dt > 0.0_cp ) then
             n_t  =n_tot
             n_tot=0
          else if ( dt > 0.0_cp ) then
             if ( t_stop > t_start ) then
                n_t=int((t_stop-t_start)/dt)+1
-            else
-               n_t=n_t_max
+            else ! In case t_start, t_stop are not provided guess a max number
+               n_t=int(time_span/dt)+1
             end if
          else if ( n_tot > 0 ) then
             n_t=n_tot
             n_tot=0
             dt=(t_stop-t_start)/real(n_t-1,kind=cp)
          end if
-         if ( n_t > n_t_max ) then
-            write(output_unit,*) '! Sorry, maximum no. of times for'
-            write(output_unit,*) '! output ',string
-            write(output_unit,*) '! is:',n_t_max
-            write(output_unit,*) '! Increase n_time_hits in c_output.f!'
-            call abortRun('Stop run in get_hit_times')
-         end if
-
          l_t=.true.
+
+         deallocate(t) ! Deallocate to get the proper size
          if ( t_start == time ) then
             n_t=n_t-1
+            allocate(t(n_t))
             t(1)=t_start+dt
          else
+            allocate(t(n_t))
             t(1)=t_start
          end if
 
@@ -925,8 +944,7 @@ contains
 
       end if
 
-
-      if ( n_tot /= 0 .AND. n_step /= 0 ) then
+      if ( n_tot /= 0 .and. n_step /= 0 ) then
          write(output_unit,*)
          write(output_unit,*) '! You have to either provide the total'
          write(output_unit,*) '! number or the step for output:'
@@ -938,7 +956,15 @@ contains
       if ( l_t ) then
          t_start=t(1)
          t_stop =t(n_t)
-         dt     =t(2)-t(1)
+         if ( n_t >= 2 ) then
+            dt=t(2)-t(1)
+         else
+            dt=0.0_cp
+         end if
+      else  ! If this is still filled with -1, reduce the size to one element
+         deallocate(t)
+         allocate(t(1))
+         t(:)=-one
       end if
 
    end subroutine get_hit_times
@@ -1016,6 +1042,7 @@ contains
             write(n_out,'(''  max cheb deg ='',i6)') 2*(n_cheb_ic_max-1)
          end if
          write(n_out,'(''  l_max        ='',i6, '' = max degree of Plm'')') l_max
+         write(n_out,'(''  m_min        ='',i6, '' = min oder of Plm'')') m_min
          write(n_out,'(''  m_max        ='',i6, '' = max oder of Plm'')') m_max
          if ( lm_max < 1000000 ) then
             write(n_out,'(''  lm_max       ='',i6, '' = no of l/m combinations'')') lm_max
@@ -1024,7 +1051,7 @@ contains
          end if
          write(n_out,'(''  minc         ='',i6, '' = longitude symmetry wave no'')') minc
          write(n_out,'(''  nalias       ='',i6, &
-              &   '' = spher. harm. deal. factor '')') nalias
+         &        '' = spher. harm. deal. factor '')') nalias
 
       end if
 

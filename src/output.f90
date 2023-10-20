@@ -23,13 +23,13 @@ module output_mod
        &            l_cmb_field, l_dt_cmb_field, l_save_out, l_non_rot,       &
        &            l_perpPar, l_energy_modes, l_heat, l_hel, l_par,          &
        &            l_chemical_conv, l_movie, l_full_sphere, l_spec_avg,      &
-       &            l_phase_field
+       &            l_phase_field, l_hemi
    use fields, only: omega_ic, omega_ma, b_ic,db_ic, ddb_ic, aj_ic, dj_ic,   &
-       &             ddj_ic, w_LMloc, dw_LMloc, ddw_LMloc, p_LMloc, xi_LMloc,&
+       &             w_LMloc, dw_LMloc, ddw_LMloc, p_LMloc, xi_LMloc,        &
        &             s_LMloc, ds_LMloc, z_LMloc, dz_LMloc, b_LMloc,          &
        &             db_LMloc, ddb_LMloc, aj_LMloc, dj_LMloc, ddj_LMloc,     &
        &             b_ic_LMloc, db_ic_LMloc, ddb_ic_LMloc, aj_ic_LMloc,     &
-       &             dj_ic_LMloc, ddj_ic_LMloc, dp_LMloc, xi_LMloc,          &
+       &             dj_ic_LMloc, ddj_ic_LMloc, xi_LMloc, dp_LMloc,          &
        &             dxi_LMloc,w_Rloc,z_Rloc,p_Rloc,s_Rloc,xi_Rloc,b_Rloc,   &
        &             aj_Rloc, bICB, phi_Rloc, phi_LMloc
    use fieldsLast, only: dwdt, dzdt, dpdt, dsdt, dbdt, djdt, dbdt_ic, dphidt,&
@@ -38,12 +38,11 @@ module output_mod
    use kinetic_energy, only: get_e_kin, get_u_square
    use magnetic_energy, only: get_e_mag
    use fields_average_mod, only: fields_average
-   use spectra, only: spectrum, spectrum_temp, get_amplitude
+   use spectra, only: spectrum, get_amplitude
    use outTO_mod, only: outTO
-   use output_data, only: tag, l_max_cmb, n_coeff_r, l_max_r, n_coeff_r_max,&
-       &                  n_r_array, n_r_step,  n_log_file, log_file
-   use constants, only: vol_oc, vol_ic, mass, surf_cmb, two, three
-   use outMisc_mod, only: outHelicity, outHeat, outPhase
+   use output_data, only: tag, l_max_cmb, n_log_file, log_file
+   use constants, only: vol_oc, vol_ic, mass, surf_cmb, two, three, zero
+   use outMisc_mod, only: outHeat, outHelicity, outHemi, outPhase, get_onset
    use geos, only: outGeos, outOmega
    use outRot, only: write_rot
    use integration, only: rInt_R
@@ -207,13 +206,10 @@ contains
    end subroutine finalize_output
 !----------------------------------------------------------------------------
    subroutine output(time,tscheme,n_time_step,l_stop_time,l_pot,l_log,    &
-              &      l_graph,lRmsCalc,l_store,l_new_rst_file,             &
+              &      l_graph,lRmsCalc,l_store,l_new_rst_file,lOnsetCalc,  &
               &      l_spectrum,lTOCalc,lTOframe,l_frame,n_frame,l_cmb,   &
               &      n_cmb_sets,l_r,lorentz_torque_ic,lorentz_torque_ma,  &
-              &      dbdt_CMB_LMloc,HelASr,Hel2ASr,HelnaASr,Helna2ASr,    &
-              &      HelEAASr,viscASr,uhASr,duhASr,gradsASr,fconvASr,     &
-              &      fkinASr,fviscASr,fpoynASr,fresASr,EperpASr,EparASr,  &
-              &      EperpaxiASr,EparaxiASr,ekinSr,ekinLr,volSr)
+              &      dbdt_CMB_LMloc)
       !
       !  This subroutine controls most of the output.
       !
@@ -223,7 +219,7 @@ contains
       class(type_tscheme), intent(in) :: tscheme
       integer,             intent(in) :: n_time_step
       logical,             intent(in) :: l_stop_time
-      logical,             intent(in) :: l_pot
+      logical,             intent(in) :: l_pot, lOnsetCalc
       logical,             intent(in) :: l_log, l_graph, lRmsCalc, l_store
       logical,             intent(in) :: l_new_rst_file, l_spectrum
       logical,             intent(in) :: lTOCalc,lTOframe
@@ -259,28 +255,6 @@ contains
       !    for calculating axisymmetric helicity.
       !    Parallelization note: These fields are R-distribute on input
       !    and must also be collected on the processor performing this routine.
-      real(cp),    intent(in) :: HelASr(2,nRstart:nRstop)
-      real(cp),    intent(in) :: Hel2ASr(2,nRstart:nRstop)
-      real(cp),    intent(in) :: HelnaASr(2,nRstart:nRstop)
-      real(cp),    intent(in) :: Helna2ASr(2,nRstart:nRstop)
-      real(cp),    intent(in) :: HelEAASr(nRstart:nRstop)
-      real(cp),    intent(in) :: viscASr(nRstart:nRstop)
-      real(cp),    intent(inout) :: uhASr(nRstart:nRstop)
-      real(cp),    intent(inout) :: gradsASr(nRstart:nRstop)
-      real(cp),    intent(inout) :: duhASr(nRstart:nRstop)
-      real(cp),    intent(in) :: fconvASr(nRstart:nRstop)
-      real(cp),    intent(in) :: fkinASr(nRstart:nRstop)
-      real(cp),    intent(in) :: fviscASr(nRstart:nRstop)
-      real(cp),    intent(in) :: fpoynASr(nRstartMag:nRstopMag)
-      real(cp),    intent(in) :: fresASr(nRstartMag:nRstopMag)
-      real(cp),    intent(inout) :: EperpASr(nRstart:nRstop)
-      real(cp),    intent(inout) :: EparASr(nRstart:nRstop)
-      real(cp),    intent(inout) :: EperpaxiASr(nRstart:nRstop)
-      real(cp),    intent(inout) :: EparaxiASr(nRstart:nRstop)
-      real(cp),    intent(inout) :: ekinSr(nRstart:nRstop)
-      real(cp),    intent(inout) :: ekinLr(nRstart:nRstop)
-      real(cp),    intent(inout) :: volSr(nRstart:nRstop)
-
       complex(cp), intent(in) :: dbdt_CMB_LMloc(llmMag:ulmMag)
 
       !--- Local stuff:
@@ -375,13 +349,10 @@ contains
          end if
 
          if ( l_spec_avg ) then
-            call spectrum(-1,time,.true.,nLogs,l_stop_time,timePassedLog,        &
-                 &        timeNormLog,w_LMloc,dw_LMloc,z_LMloc,b_LMloc,db_LMloc, &
+            call spectrum(-1,time,.true.,nLogs,l_stop_time,timePassedLog,      &
+                 &        timeNormLog,s_LMloc,ds_LMloc,xi_LMloc,dxi_LMloc,     &
+                 &        phi_LMloc,w_LMloc,dw_LMloc,z_LMloc,b_LMloc,db_LMloc, &
                  &        aj_LMloc,b_ic_LMloc,db_ic_LMloc,aj_ic_LMloc)
-            if ( l_heat ) then
-               call spectrum_temp(-1,time,.true.,nLogs,l_stop_time,   &
-                    &             timePassedLog,timeNormLog,s_LMloc,ds_LMloc)
-            end if
          end if
 
          if ( l_average ) then
@@ -421,7 +392,7 @@ contains
                  &          lorentz_torque_ma,w_LMloc,z_LMloc,               &
                  &          dz_LMloc,s_LMloc,xi_LMloc,                       &
                  &          b_LMloc,ddb_LMloc,aj_LMloc,dj_LMloc,db_ic_LMloc, &
-                 &          ddb_ic_LMloc,aj_ic_LMloc,dj_ic_LMloc,viscASr,    &
+                 &          ddb_ic_LMloc,aj_ic_LMloc,dj_ic_LMloc,            &
                  &          visDiss,ohmDiss)
             PERFOFF
             if (DEBUG_OUTPUT) write(output_unit,"(A,I6)") "Written  power  on rank ",rank
@@ -439,31 +410,28 @@ contains
               &      dlVRc,dlPolPeakR,'V')
 
          !-- Out radial profiles of parameters
-         call outPar(timePassedLog,timeNormLog,l_stop_time,ekinR,RolRu2,   &
-              &      dlVR,dlVRc,dlPolPeakR,uhASr,duhASr,gradsASr,fconvASr, &
-              &      fkinASr,fviscASr,fpoynASr,fresASr,RmR)
+         call outPar(s_LMloc, ds_LMloc, xi_LMloc, p_LMloc, dp_LMloc, timePassedLog, &
+              &      timeNormLog, l_stop_time, ekinR, RolRu2, dlVR, dlVRc,          &
+              &      dlPolPeakR, RmR)
 
          !-- Perpendicular/parallel
-         if ( l_perpPar ) then
-            call outPerpPar(time,timePassedLog,timeNormLog,l_stop_time, &
-                 &          EperpASr,EparASr,EperpaxiASr,EparaxiASr)
-         end if
+         if ( l_perpPar ) call outPerpPar(time,timePassedLog,timeNormLog,l_stop_time)
 
          if (DEBUG_OUTPUT) write(output_unit,"(A,I6)") "Written  outPar  on rank ",rank
 
          if ( l_heat .or. l_chemical_conv ) then
             call outHeat(timeScaled,timePassedLog,timeNormLog,l_stop_time, &
-                 &       s_LMloc,ds_LMloc,p_LMloc,dp_LMloc,xi_LMloc,       &
+                 &       s_LMloc,ds_LMloc,p_LMloc,xi_LMloc,                &
                  &       dxi_LMloc)
          end if
 
-         if ( l_hel ) call outHelicity(timeScaled,HelASr,Hel2ASr,HelnaASr, &
-                           &           Helna2ASr,HelEAASr)
+         if ( l_hel ) call outHelicity(timeScaled)
+
+         if ( l_hemi ) call outHemi(timeScaled)
 
          if ( l_phase_field ) call outPhase(timeScaled,timePassedLog,       &
                                    &        timeNormLog,l_stop_time,nLogs,  &
-                                   &        s_LMloc,ds_LMloc,phi_LMloc,     &
-                                   &        ekinSr,ekinLr,volSr)
+                                   &        s_LMloc,ds_LMloc,phi_LMloc)
 
          if ( l_par ) then
             call outGeos(timeScaled,Geos,GeosA,GeosZ,GeosM,GeosNAP,EC)
@@ -493,12 +461,9 @@ contains
       if ( l_spectrum ) then
          n_spec=n_spec+1
          call spectrum(n_spec,time,.false.,nLogs,l_stop_time,timePassedLog, &
-              &        timeNormLog,w_LMloc,dw_LMloc,z_LMloc,b_LMloc,db_LMloc, &
+              &        timeNormLog,s_LMloc,ds_LMloc,xi_LMloc,dxi_LMloc,     &
+              &        phi_LMloc,w_LMloc,dw_LMloc,z_LMloc,b_LMloc,db_LMloc, &
               &        aj_LMloc,b_ic_LMloc,db_ic_LMloc,aj_ic_LMloc)
-         if ( l_heat ) then
-            call spectrum_temp(n_spec,time,.false.,nLogs,l_stop_time,     &
-                 &             timePassedLog,timeNormLog,s_LMloc,ds_LMloc)
-         end if
          if ( rank == 0 ) then
             write(output_unit,'(1p,/,A,/,A,ES20.10,/,A,i15,/,A,A)')&
             &    " ! Storing spectra:",                            &
@@ -541,6 +506,10 @@ contains
               &               dj_ic_LMloc,ddj_ic_LMloc,l_frame)
       end if
 
+      !-- Compute growth rates and drift frequencies of several wavenumbers
+      if ( lOnsetCalc .and. (.not. l_stop_time) ) then
+         call get_onset(time, w_LMloc, tscheme%dt(1), l_log, nLogs)
+      end if
 
       if ( l_RMS ) then
          if ( n_time_step == 1 ) then
@@ -590,7 +559,7 @@ contains
 
       !--- Store potential coeffs for velocity fields and magnetic fields
       if ( l_r ) call write_coeffs(w_LMloc, dw_LMloc, ddw_LMloc, z_LMLoc, b_LMLoc,  &
-                      &            db_LMloc, ddb_LMloc, aj_LMloc, dj_LMloc, s_LMloc,&
+                      &            db_LMloc, ddb_LMloc, aj_LMloc, s_LMloc,          &
                       &            xi_LMloc, timeScaled)
 
       if ( l_pot ) then
@@ -678,7 +647,15 @@ contains
 
             call gather_all_from_lo_to_rank0(gt_IC,aj_ic_LMloc,aj_ic)
             call gather_all_from_lo_to_rank0(gt_IC,dj_ic_LMloc,dj_ic)
-            call gather_all_from_lo_to_rank0(gt_IC,ddj_ic_LMloc,ddj_ic)
+         else if ( l_mag ) then ! Set to zero (compat with Leg TF)
+            if ( rank == 0 ) then
+               db_ic(:,1)=zero
+               aj_ic(:,1)=zero
+               if ( l_frame ) then
+                  ddb_ic(:,1)=zero
+                  dj_ic(:,1) =zero
+               end if
+            end if
          end if
 
          ! for writing a restart file, we also need the d?dtLast arrays,

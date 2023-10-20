@@ -63,7 +63,7 @@ def selectField(obj, field, labTex=True, ic=False):
         else:
             label = 'xi'
         data_ic = None
-    elif field in ('phase'):
+    elif field in ('phase', 'Phase'):
         data = obj.phase
         if labTex:
             label = r'$\Phi$'
@@ -96,7 +96,11 @@ def selectField(obj, field, labTex=True, ic=False):
         data = obj.entropy
         label = 'Entropy'
         data_ic = None
-    elif field in ('u2'):
+    elif field in ('temperature', 't', 'T', 'temp'):
+        data = obj.entropy
+        label = 'Temperature'
+        data_ic = None
+    elif field == 'u2':
         data = obj.vphi**2+obj.vr**2+obj.vtheta**2
         if labTex:
             label = r'$u^2$'
@@ -111,7 +115,7 @@ def selectField(obj, field, labTex=True, ic=False):
         else:
             label = 'Ekin'
         data_ic = None
-    elif field in ('b2', 'B2'):
+    elif field in ('b2', 'B2', 'Emag', 'em', 'Em', 'emag'):
         data = obj.Bphi**2+obj.Br**2+obj.Btheta**2
         if labTex:
             label = r'$B^2$'
@@ -142,7 +146,7 @@ def selectField(obj, field, labTex=True, ic=False):
         else:
             label = 'vp conv'
         data_ic = None
-    elif field in ('bpfluct'):
+    elif field == 'bpfluct':
         data = obj.Bphi-obj.Bphi.mean(axis=0)
         if labTex:
             label = r"$B_{\phi}'$"
@@ -152,7 +156,7 @@ def selectField(obj, field, labTex=True, ic=False):
             data_ic = obj.Bphi_ic-obj.Bphi_ic.mean(axis=0)
         else:
             data_ic = None
-    elif field in ('brfluct'):
+    elif field == 'brfluct':
         data = obj.Br-obj.Br.mean(axis=0)
         if labTex:
             label = r"$B_r'$"
@@ -162,28 +166,35 @@ def selectField(obj, field, labTex=True, ic=False):
             data_ic = obj.Br_ic-obj.Br_ic.mean(axis=0)
         else:
             data_ic = None
-    elif field in ('entropyfluct'):
+    elif field == 'entropyfluct':
         data = obj.entropy-obj.entropy.mean(axis=0)
         if labTex:
             label = r"$s'$"
         else:
             label = "s'"
         data_ic = None
-    elif field in ('xifluct'):
+    elif field in ('tfluct', 'Tfluct'):
+        data = obj.entropy-obj.entropy.mean(axis=0)
+        if labTex:
+            label = r"$T'$"
+        else:
+            label = "T'"
+        data_ic = None
+    elif field == 'xifluct':
         data = obj.xi-obj.xi.mean(axis=0)
         if labTex:
             label = r"$\xi'$"
         else:
             label = "xi'"
         data_ic = None
-    elif field in ('prefluct'):
+    elif field == 'prefluct':
         data = obj.pre-obj.pre.mean(axis=0)
         if labTex:
             label = r"$p'$"
         else:
             label = "p'"
         data_ic = None
-    elif field in ('vrea'):
+    elif field == 'vrea':
         data = np.zeros_like(obj.vr)
         for i in range(obj.ntheta):
             data[:, i, :] = (obj.vr[:, i, :]-obj.vr[:, -i-1, :])/2.
@@ -192,7 +203,7 @@ def selectField(obj, field, labTex=True, ic=False):
         else:
             label = 'vr ea'
         data_ic = None
-    elif field in ('vra'):
+    elif field == 'vra':
         data = np.zeros_like(obj.vr)
         for i in range(obj.ntheta):
             data[:, i, :] = (obj.vr[:, i, :]+obj.vr[:, -i-1, :])/2.
@@ -201,7 +212,7 @@ def selectField(obj, field, labTex=True, ic=False):
         else:
             label = 'vr es'
         data_ic = None
-    elif field in ('vpea'):
+    elif field == 'vpea':
         data = np.zeros_like(obj.vr)
         for i in range(obj.ntheta):
             data[:, i, :] = (obj.vphi[:, i, :]-obj.vphi[:, -i-1, :])/2.
@@ -210,7 +221,7 @@ def selectField(obj, field, labTex=True, ic=False):
         else:
             label = r'vp ea'
         data_ic = None
-    elif field in ('vpa'):
+    elif field == 'vpa':
         data = np.zeros_like(obj.vr)
         for i in range(obj.ntheta):
             data[:, i, :] = (obj.vphi[:, i, :]+obj.vphi[:, -i-1, :])/2.
@@ -219,19 +230,19 @@ def selectField(obj, field, labTex=True, ic=False):
         else:
             label = r'vp es'
         data_ic = None
-    elif field in ('tea'):
+    elif field == 'tea':
         data = np.zeros_like(obj.vr)
         for i in range(obj.ntheta):
             data[:, i, :] = (obj.entropy[:, i, :]-obj.entropy[:, -i-1, :])/2.
         if labTex:
-            label = r'$s$ ea'
+            label = r'$T$ ea'
         else:
-            label = r's ea'
+            label = r'T ea'
         data_ic = None
 
     return data, data_ic, label
 
-def avgField(time, field, tstart=None, std=False):
+def avgField(time, field, tstart=None, std=False, fix_missing_series=False):
     """
     This subroutine computes the time-average (and the std) of a time series
 
@@ -247,6 +258,10 @@ def avgField(time, field, tstart=None, std=False):
     :type tstart: float
     :param std: when set to True, the standard deviation is also calculated
     :type std: bool
+    :param fix_missing_series: when set to True, data equal to zero are ignored,
+                               this is done in case new columns have been added
+                               to the time series
+    :type fix_missing_series: bool
     :returns: the time-averaged quantity
     :rtype: float
     """
@@ -256,22 +271,35 @@ def avgField(time, field, tstart=None, std=False):
     else: # the whole input array is taken!
         ind = 0
 
+    # Now suppose data were not stored in the first part of the run
+    # then the time series could look like 0,0,0,...,data,data,data
+    # In that case starting index needs to be overwritten
+    if field[ind] == 0 and fix_missing_series:
+        mask = np.where(field != 0, 1, 0)
+        mask = np.nonzero(mask)[0]
+        if len(mask) > 0:
+            ind1 = mask[0]
+            if ind1 > ind:
+                ind = ind1
+
     if time[ind:].shape[0] == 1: # Only one entry in the array
         avgField = field[ind]
-        if std:
-            stdField = 0.
-            return avgField, stdField
-        else:
-            return avgField
+        stdField = 0.
     else:
-        fac = 1./(time[-1]-time[ind])
-        avgField = fac*np.trapz(field[ind:], time[ind:])
-
-        if std:
-            stdField = np.sqrt(fac*np.trapz((field[ind:]-avgField)**2, time[ind:]))
-            return avgField, stdField
+        if time[-1] == time[ind]: # Same time: this can happen for timestep.TAG
+            avgField = field[-1]
+            stdField = 0.
         else:
-            return avgField
+            fac = 1./(time[-1]-time[ind])
+            avgField = fac*np.trapz(field[ind:], time[ind:])
+            if std:
+                stdField = np.sqrt(fac*np.trapz((field[ind:]-avgField)**2,
+                                   time[ind:]))
+
+    if std:
+        return avgField, stdField
+    else:
+        return avgField
 
 def writeVpEq(par, tstart):
     """
@@ -755,7 +783,7 @@ def rderavg(data, rad, exclude=False):
     Radial derivative of an input array
 
     >>> gr = MagiGraph()
-    >>> dvrdr = rderavg(gr.vr, eta=gr.radratio)
+    >>> dvrdr = rderavg(gr.vr, gr.radius)
 
     :param data: input array
     :type data: numpy.ndarray
@@ -809,6 +837,7 @@ def rderavg(data, rad, exclude=False):
         der = (np.roll(data, -1,  axis=-1)-np.roll(data, 1, axis=-1))/denom
         der[..., 0] = (data[..., 1]-data[..., 0])/(grid[1]-grid[0])
         der[..., -1] = (data[..., -1]-data[..., -2])/(grid[-1]-grid[-2])
+
     return der
 
 def thetaderavg(data, order=4):
@@ -865,7 +894,7 @@ def zderavg(data, rad, colat=None, exclude=False):
     z derivative of an input array
 
     >>> gr = MagiGraph()
-    >>> dvrdz = zderavg(gr.vr, eta=gr.radratio, colat=gr.colatitude)
+    >>> dvrdz = zderavg(gr.vr, gr.radius, colat=gr.colatitude)
 
     :param data: input array
     :type data: numpy.ndarray
@@ -890,7 +919,6 @@ def zderavg(data, rad, colat=None, exclude=False):
         th = colat
     else:
         th = np.linspace(0., np.pi, ntheta)
-    rr = chebgrid(nr-1, r1, r2)
 
     if len(data.shape) == 3:  # 3-D
         thmD = np.zeros_like(data)
@@ -911,7 +939,7 @@ def sderavg(data, rad, colat=None, exclude=False):
     s derivative of an input array
 
     >>> gr = MagiGraph()
-    >>> dvpds = sderavg(gr.vphi, eta=gr.radratio, colat=gr.colatitude)
+    >>> dvpds = sderavg(gr.vphi, gr.radius, colat=gr.colatitude)
 
     :param data: input array
     :type data: numpy.ndarray

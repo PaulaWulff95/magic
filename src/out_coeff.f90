@@ -15,7 +15,8 @@ module out_coeff
        &                          raxi, sc
    use num_param, only: tScale
    use blocking, only: lm2, llm, ulm
-   use truncation, only: lm_max, l_max, minc, n_r_max, n_r_ic_max, minc
+   use truncation, only: lm_max, l_max, minc, n_r_max, n_r_ic_max, minc,&
+       &                 m_min, m_max
    use communications, only: gather_from_lo_to_rank0, gather_all_from_lo_to_rank0,&
        &                     gt_IC, gt_OC
    use output_data, only: tag, n_coeff_r, n_r_array, n_r_step, l_max_r, n_coeff_r_max
@@ -260,7 +261,7 @@ contains
    end subroutine write_Bcmb
 !----------------------------------------------------------------------
    subroutine write_coeffs(w_LMloc, dw_LMloc, ddw_LMloc, z_LMLoc, b_LMLoc,  &
-              &            db_LMloc, ddb_LMloc, aj_LMloc, dj_LMloc, s_LMloc,&
+              &            db_LMloc, ddb_LMloc, aj_LMloc, s_LMloc,          &
               &            xi_LMloc, timeScaled)
       !
       ! This routine handles the writing of coefficients at a given depth
@@ -275,7 +276,6 @@ contains
       complex(cp), intent(in) :: db_LMloc(:,:)
       complex(cp), intent(in) :: ddb_LMloc(:,:)
       complex(cp), intent(in) :: aj_LMloc(:,:)
-      complex(cp), intent(in) :: dj_LMloc(:,:)
       complex(cp), intent(in) :: s_LMloc(:,:)
       complex(cp), intent(in) :: xi_LMloc(:,:)
 
@@ -540,6 +540,7 @@ contains
       !-- Local variables
       complex(outp), allocatable :: tmp(:,:)
       complex(cp), allocatable :: work(:,:)
+      real(outp) :: tmpr(n_r_max)
       integer :: info, fh, version, istat(MPI_STATUS_SIZE), datatype
       integer :: arr_size(2), arr_loc_size(2), arr_start(2)
       integer(lip) :: disp, offset, size_tmp
@@ -548,8 +549,7 @@ contains
       character(80) :: fileName
       logical :: lVB
 
-      version = 1 ! file version
-
+      version = 2 ! file version
 
       allocate( tmp(lm_max,nRstart:nRstop) )
 
@@ -597,16 +597,17 @@ contains
          call MPI_File_Write(fh, l_max, 1, MPI_INTEGER, istat, ierr)
          call MPI_File_Write(fh, minc, 1, MPI_INTEGER, istat, ierr)
          call MPI_File_Write(fh, lm_max, 1, MPI_INTEGER, istat, ierr)
-
+         call MPI_File_Write(fh, m_min, 1, MPI_INTEGER, istat, ierr)
+         call MPI_File_Write(fh, m_max, 1, MPI_INTEGER, istat, ierr)
          call MPI_File_Write(fh, real(omega_ic,outp), 1, MPI_OUT_REAL, &
               &              istat, ierr)
          call MPI_File_Write(fh, real(omega_ma,outp), 1, MPI_OUT_REAL, &
               &              istat, ierr)
 
-         call MPI_File_Write(fh, real(r,outp), n_r_max, MPI_OUT_REAL, &
-              &              istat, ierr)
-         call MPI_File_Write(fh, real(rho0,outp), n_r_max, MPI_OUT_REAL, &
-              &              istat, ierr)
+         tmpr(:)=real(r,outp)
+         call MPI_File_Write(fh, tmpr, n_r_max, MPI_OUT_REAL, istat, ierr)
+         tmpr(:)=real(rho0,outp)
+         call MPI_File_Write(fh, tmpr, n_r_max, MPI_OUT_REAL, istat, ierr)
 
          !-- Rank 0 gets the displacement
          call MPI_File_get_position(fh, offset, ierr)
@@ -724,7 +725,7 @@ contains
       character(80) :: fileName
       logical :: lVB
 
-      version = 1
+      version = 2 ! file version 2 stores m_min and m_max in the header
 
       head = trim(adjustl(root))
       lVB=.false.
@@ -766,6 +767,8 @@ contains
          &                 real(sigma_ratio,kind=outp)
 
          write(fileHandle) n_r_max,n_r_ic_max,l_max,minc,lm_max
+
+         write(fileHandle) m_min, m_max
 
          write(fileHandle) real(omega_ic,kind=outp), real(omega_ma,kind=outp)
 

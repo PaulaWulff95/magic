@@ -98,5 +98,9 @@ module logic
    logical :: l_packed_transp ! Pack or don't pack MPI transposes
    logical :: l_parallel_solve ! Use R-distributed parallel solver (work only for F.D.)
    logical :: l_mag_par_solve ! Can be remove once inner core has also been ported
+   logical :: l_hemi ! Compute North/South asymmetry of energies
+   logical :: l_onset ! A flag to turn MagIC into a linear stability analysis code
+   logical :: l_scramble_theta ! A flag to set theta scrambling
+   logical :: l_geosMovie ! A flag to trigger the production of geos movies
 
 end module logic

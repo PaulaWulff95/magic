@@ -9,9 +9,9 @@ module storeCheckPoints
    use parallel_mod
    use communications, only: gt_OC, gt_IC, gather_from_lo_to_rank0, &
        &                     gather_all_from_lo_to_rank0, lo2r_one
-   use truncation, only: n_r_max,n_r_ic_max,minc,nalias,n_theta_max,n_phi_tot, &
-       &                 lm_max,lm_maxMag,n_r_maxMag,n_r_ic_maxMag,l_max,      &
-       &                 fd_stretch, fd_ratio
+   use truncation, only: n_r_max, n_r_ic_max, minc, nalias, n_theta_max,  &
+       &                 n_phi_tot, lm_max, lm_maxMag, n_r_maxMag, m_max, &
+       &                 n_r_ic_maxMag, l_max, fd_stretch, fd_ratio, m_min
    use radial_functions, only: rscheme_oc, r
    use physical_parameters, only: ra, pr, prmag, radratio, ek, sigma_ratio, &
        &                          raxi, sc, stef
@@ -87,7 +87,7 @@ contains
       integer :: n_rst_file, version, n_o
       character(len=72) :: string,rst_file
 
-      version = 3
+      version = 4
       l_press_store = ( .not. l_double_curl ) 
 
       if ( l_ave_file ) then
@@ -102,12 +102,14 @@ contains
       end if
 
 #ifdef WITH_MPI
-      if ( l_parallel_solve ) then
-         call MPI_Bcast(omega_ma1,1,MPI_DEF_REAL,0,MPI_COMM_WORLD,ierr)
-         call MPI_Bcast(omega_ic1,1,MPI_DEF_REAL,n_procs-1,MPI_COMM_WORLD,ierr)
-      else
-         call MPI_Bcast(omega_ma1,1,MPI_DEF_REAL,rank_with_l1m0,MPI_COMM_WORLD,ierr)
-         call MPI_Bcast(omega_ic1,1,MPI_DEF_REAL,rank_with_l1m0,MPI_COMM_WORLD,ierr)
+      if ( m_min == 0 ) then
+         if ( l_parallel_solve ) then
+            call MPI_Bcast(omega_ma1,1,MPI_DEF_REAL,0,MPI_COMM_WORLD,ierr)
+            call MPI_Bcast(omega_ic1,1,MPI_DEF_REAL,n_procs-1,MPI_COMM_WORLD,ierr)
+         else
+            call MPI_Bcast(omega_ma1,1,MPI_DEF_REAL,rank_with_l1m0,MPI_COMM_WORLD,ierr)
+            call MPI_Bcast(omega_ic1,1,MPI_DEF_REAL,rank_with_l1m0,MPI_COMM_WORLD,ierr)
+         end if
       end if
 #endif
 
@@ -124,6 +126,7 @@ contains
          write(n_rst_file) ra,pr,raxi,sc,prmag,ek,stef,radratio,sigma_ratio
          write(n_rst_file) n_r_max,n_theta_max,n_phi_tot,minc,nalias, &
          &                 n_r_ic_max
+         write(n_rst_file) l_max, m_min, m_max
 
          !-- Store radius and scheme version (FD or CHEB)
          if ( rscheme_oc%version == 'cheb' ) then
@@ -370,7 +373,8 @@ contains
       type(type_tscalar),  intent(in) :: lorentz_torque_ic_dt, lorentz_torque_ma_dt
 
       !-- Local variables
-      complex(cp), allocatable :: work(:,:)
+      real(cp) :: dtscale(size(tscheme%dt))
+      complex(cp), allocatable :: work(:,:), tmp(:)
       logical :: l_press_store, l_transp
       integer :: version, info, fh, datatype, n_r
       character(len=72) :: string, rst_file
@@ -378,7 +382,7 @@ contains
       integer :: arr_size(2), arr_loc_size(2), arr_start(2), n_o
       integer(lip) :: disp, offset, size_tmp
 
-      version = 3
+      version = 4
       l_press_store = (.not. l_double_curl)
 
       allocate( work(lm_max,nRstart:nRstop) )
@@ -395,12 +399,14 @@ contains
       end if
 
 #ifdef WITH_MPI
-      if ( l_parallel_solve ) then
-         call MPI_Bcast(omega_ma1,1,MPI_DEF_REAL,0,MPI_COMM_WORLD,ierr)
-         call MPI_Bcast(omega_ic1,1,MPI_DEF_REAL,n_procs-1,MPI_COMM_WORLD,ierr)
-      else
-         call MPI_Bcast(omega_ma1,1,MPI_DEF_REAL,rank_with_l1m0,MPI_COMM_WORLD,ierr)
-         call MPI_Bcast(omega_ic1,1,MPI_DEF_REAL,rank_with_l1m0,MPI_COMM_WORLD,ierr)
+      if ( m_min == 0 ) then
+         if ( l_parallel_solve ) then
+            call MPI_Bcast(omega_ma1,1,MPI_DEF_REAL,0,MPI_COMM_WORLD,ierr)
+            call MPI_Bcast(omega_ic1,1,MPI_DEF_REAL,n_procs-1,MPI_COMM_WORLD,ierr)
+         else
+            call MPI_Bcast(omega_ma1,1,MPI_DEF_REAL,rank_with_l1m0,MPI_COMM_WORLD,ierr)
+            call MPI_Bcast(omega_ic1,1,MPI_DEF_REAL,rank_with_l1m0,MPI_COMM_WORLD,ierr)
+         end if
       end if
 #endif
 
@@ -425,7 +431,8 @@ contains
          call MPI_File_Write(fh, tscheme%nexp, 1, MPI_INTEGER, istat, ierr)
          call MPI_File_Write(fh, tscheme%nimp, 1, MPI_INTEGER, istat, ierr)
          call MPI_File_Write(fh, tscheme%nold, 1, MPI_INTEGER, istat, ierr)
-         call MPI_File_Write(fh, tscheme%dt*tScale, size(tscheme%dt), MPI_DEF_REAL, &
+         dtscale(:)=tscheme%dt*tScale
+         call MPI_File_Write(fh, dtscale, size(tscheme%dt), MPI_DEF_REAL, &
               &              istat, ierr)
          call MPI_File_Write(fh, n_time_step, 1, MPI_INTEGER, istat, ierr)
          call MPI_File_Write(fh, ra, 1, MPI_DEF_REAL, istat, ierr)
@@ -443,6 +450,9 @@ contains
          call MPI_File_Write(fh, minc, 1, MPI_INTEGER, istat, ierr)
          call MPI_File_Write(fh, nalias, 1, MPI_INTEGER, istat, ierr)
          call MPI_File_Write(fh, n_r_ic_max, 1, MPI_INTEGER, istat, ierr)
+         call MPI_File_Write(fh, l_max, 1, MPI_INTEGER, istat, ierr)
+         call MPI_File_Write(fh, m_min, 1, MPI_INTEGER, istat, ierr)
+         call MPI_File_Write(fh, m_max, 1, MPI_INTEGER, istat, ierr)
 
          !-- Store radius and scheme version (FD or CHEB)
          call MPI_File_Write(fh, rscheme_oc%version, len(rscheme_oc%version), &
@@ -621,14 +631,16 @@ contains
       !-- Inner core magnetic field (only written by rank 0 for now)
       if ( l_mag .and. l_cond_ic ) then
 
+         allocate( tmp(lm_max) )
          if ( rank == 0 ) then
             allocate ( work(lm_max, n_r_ic_max) )
          else
-            allocate ( work(1,1) )
+            allocate ( work(1,n_r_ic_max) )
          end if
 
          do n_r=1,n_r_ic_max
-            call gather_from_lo_to_rank0(b_ic(:,n_r), work(:,n_r))
+            call gather_from_lo_to_rank0(b_ic(:,n_r), tmp)
+            if ( rank == 0 ) work(:,n_r)=tmp(:)
          end do
          if ( rank == 0 ) then
             call MPI_File_Write(fh, work, lm_max*n_r_ic_max, MPI_DEF_COMPLEX, &
@@ -637,7 +649,8 @@ contains
          if ( tscheme%family == 'MULTISTEP' ) then
             do n_o=2,tscheme%nexp
                do n_r=1,n_r_ic_max
-                  call gather_from_lo_to_rank0(dbdt_ic%expl(:,n_r,n_o), work(:,n_r))
+                  call gather_from_lo_to_rank0(dbdt_ic%expl(:,n_r,n_o), tmp)
+                  if ( rank == 0 ) work(:,n_r)=tmp(:)
                end do
                if ( rank == 0 ) then
                   call MPI_File_Write(fh, work, lm_max*n_r_ic_max, MPI_DEF_COMPLEX, &
@@ -646,7 +659,8 @@ contains
             end do
             do n_o=2,tscheme%nimp
                do n_r=1,n_r_ic_max
-                  call gather_from_lo_to_rank0(dbdt_ic%impl(:,n_r,n_o), work(:,n_r))
+                  call gather_from_lo_to_rank0(dbdt_ic%impl(:,n_r,n_o), tmp)
+                  if ( rank == 0 ) work(:,n_r)=tmp(:)
                end do
                if ( rank == 0 ) then
                   call MPI_File_Write(fh, work, lm_max*n_r_ic_max, MPI_DEF_COMPLEX, &
@@ -655,7 +669,8 @@ contains
             end do
             do n_o=2,tscheme%nold
                do n_r=1,n_r_ic_max
-                  call gather_from_lo_to_rank0(dbdt_ic%old(:,n_r,n_o), work(:,n_r))
+                  call gather_from_lo_to_rank0(dbdt_ic%old(:,n_r,n_o), tmp)
+                  if ( rank == 0 ) work(:,n_r)=tmp(:)
                end do
                if ( rank == 0 ) then
                   call MPI_File_Write(fh, work, lm_max*n_r_ic_max, MPI_DEF_COMPLEX, &
@@ -665,7 +680,8 @@ contains
          end if
 
          do n_r=1,n_r_ic_max
-            call gather_from_lo_to_rank0(aj_ic(:,n_r), work(:,n_r))
+            call gather_from_lo_to_rank0(aj_ic(:,n_r), tmp)
+            if ( rank == 0 ) work(:,n_r)=tmp(:)
          end do
          if ( rank == 0 ) then
             call MPI_File_Write(fh, work, lm_max*n_r_ic_max, MPI_DEF_COMPLEX, &
@@ -674,7 +690,8 @@ contains
          if ( tscheme%family == 'MULTISTEP' ) then
             do n_o=2,tscheme%nexp
                do n_r=1,n_r_ic_max
-                  call gather_from_lo_to_rank0(djdt_ic%expl(:,n_r,n_o), work(:,n_r))
+                  call gather_from_lo_to_rank0(djdt_ic%expl(:,n_r,n_o), tmp)
+                  if ( rank == 0 ) work(:,n_r)=tmp(:)
                end do
                if ( rank == 0 ) then
                   call MPI_File_Write(fh, work, lm_max*n_r_ic_max, MPI_DEF_COMPLEX, &
@@ -683,7 +700,8 @@ contains
             end do
             do n_o=2,tscheme%nimp
                do n_r=1,n_r_ic_max
-                  call gather_from_lo_to_rank0(djdt_ic%impl(:,n_r,n_o), work(:,n_r))
+                  call gather_from_lo_to_rank0(djdt_ic%impl(:,n_r,n_o), tmp)
+                  if ( rank == 0 ) work(:,n_r)=tmp(:)
                end do
                if ( rank == 0 ) then
                   call MPI_File_Write(fh, work, lm_max*n_r_ic_max, MPI_DEF_COMPLEX, &
@@ -692,7 +710,8 @@ contains
             end do
             do n_o=2,tscheme%nold
                do n_r=1,n_r_ic_max
-                  call gather_from_lo_to_rank0(djdt_ic%old(:,n_r,n_o), work(:,n_r))
+                  call gather_from_lo_to_rank0(djdt_ic%old(:,n_r,n_o), tmp)
+                  if ( rank == 0 ) work(:,n_r)=tmp(:)
                end do
                if ( rank == 0 ) then
                   call MPI_File_Write(fh, work, lm_max*n_r_ic_max, MPI_DEF_COMPLEX, &
@@ -701,7 +720,7 @@ contains
             end do
          end if
 
-         deallocate( work ) 
+         deallocate( work, tmp )
 
       end if
 

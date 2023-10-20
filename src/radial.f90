@@ -5,7 +5,7 @@ module radial_functions
    !
 
    use iso_fortran_env, only: output_unit
-   use truncation, only: n_r_max, n_cheb_max, n_r_ic_max, fd_ratio, &
+   use truncation, only: n_r_max, n_cheb_max, n_r_ic_max, fd_ratio, rcut_l, &
        &                 fd_stretch, fd_order, fd_order_bound, l_max
    use algebra, only: prepare_mat, solve_mat
    use constants, only: sq4pi, one, two, three, four, half, pi
@@ -13,7 +13,8 @@ module radial_functions
    use logic, only: l_mag, l_cond_ic, l_heat, l_anelastic_liquid,  &
        &            l_isothermal, l_anel, l_non_adia, l_centrifuge,&
        &            l_temperature_diff, l_single_matrix, l_var_l,  &
-       &            l_finite_diff, l_newmap, l_full_sphere
+       &            l_finite_diff, l_newmap, l_full_sphere,        &
+       &            l_chemical_conv
    use radial_data, only: nRstart, nRstop
    use chebyshev_polynoms_mod ! Everything is needed
    use cosine_transform_odd
@@ -50,6 +51,7 @@ module radial_functions
    real(cp), public, allocatable :: ddLtemp0(:)  ! :math:`d/dr(1/T dT/dr)`
    real(cp), private, allocatable :: d2temp0(:)  ! Second rad. derivative of background temperature
    real(cp), public, allocatable :: dentropy0(:) ! Radial gradient of background entropy
+   real(cp), public, allocatable :: dxicond(:)   ! Radial gradient of chemical composition
    real(cp), public, allocatable :: orho1(:)     ! :math:`1/\tilde{\rho}`
    real(cp), public, allocatable :: orho2(:)     ! :math:`1/\tilde{\rho}^2`
    real(cp), public, allocatable :: beta(:)      ! Inverse of density scale height drho0/rho0
@@ -134,6 +136,12 @@ contains
       allocate( rgrav(n_r_max), ogrun(n_r_max) )
       bytes_allocated = bytes_allocated+(22*n_r_max+3*n_r_ic_max)*SIZEOF_DEF_REAL
 
+      if ( l_chemical_conv ) then
+         allocate( dxicond(n_r_max) )
+         dxicond(:)=0.0_cp
+         bytes_allocated = bytes_allocated+n_r_max*SIZEOF_DEF_REAL
+      end if
+
       allocate( lambda(n_r_max),dLlambda(n_r_max),jVarCon(n_r_max) )
       allocate( sigma(n_r_max),kappa(n_r_max),dLkappa(n_r_max) )
       allocate( visc(n_r_max),dLvisc(n_r_max),ddLvisc(n_r_max) )
@@ -203,6 +211,8 @@ contains
       deallocate( lambda, dLlambda, jVarCon, sigma, kappa, dLkappa )
       deallocate( visc, dLvisc, ddLvisc, epscProf, divKtemp0 )
 
+      if ( l_chemical_conv ) deallocate(dxicond)
+
       if ( .not. l_full_sphere ) then
          deallocate( dr_top_ic )
          deallocate( cheb_ic, dcheb_ic, d2cheb_ic, cheb_int_ic )
@@ -243,7 +253,6 @@ contains
       character(len=76) :: fileName
       integer :: fileHandle
       real(cp) :: ratio1, ratio2, diff, coeff
-
 
       !-- Radial grid point:
       !   radratio is aspect ratio
@@ -291,6 +300,10 @@ contains
       if ( l_var_l ) then ! Nat's form from Marti et al. (2014)
          !l_R(:) = int(one+(l_max-one)*sqrt(r(nRstart:nRstop)/r_cmb))
          l_R(:) = int(one+(l_max-one)*sqrt(r(:)/r_cmb))
+         l_R(:) = int(one+l_max*sqrt(r(:)/r_cmb/rcut_l))
+         do n_r=1,n_r_max
+            if ( l_R(n_r) > l_max ) l_R(n_r)=l_max
+         end do
          call logWrite('! Spherical harmonic degree varies with radius')
          call logWrite('! It increases between l_min and l_max following:')
          write(message,'(''!   l_min ='',i5, '' at r ='', f7.4)') minval(l_R(:)), &
