@@ -996,6 +996,7 @@ contains
       integer :: bExp
 
       integer :: l1m0,l2m0,l3m0,l1m1
+      integer :: filehandle
 
       l1m0 = lo_map%lm2(1,0)
       l2m0 = lo_map%lm2(2,0)
@@ -1010,6 +1011,7 @@ contains
          lm0 = l1m0
          bpeakbot = -sqrt(third*pi)*r_icb**2*amp_b1
          bpeaktop = 0.0_cp
+         write(*,*) 'bpeakbot,lm0',bpeakbot,amp_b1
 
       else if ( imagcon == -2 ) then
 
@@ -1186,14 +1188,50 @@ contains
          if ( llm <= l1m0 .and. ulm >= l1m0 ) then ! select processor
             b_pol=-amp_b1*r_icb**3*sqrt(third*pi)
             do n_r=1,n_r_max
-               b(l1m0,n_r)=b(l1m0,n_r)+b_pol*or1(n_r)
+!               b(l1m0,n_r)=b(l1m0,n_r)+b_pol*or1(n_r)
+!--------------------------------------------------PW
+               if (imagcon == -1) then
+                  if (l_start_file) then
+                     b(l1m0,n_r)=b(l1m0,n_r)
+                  else !no restart file, analytical solution (right for kbotb=1)
+                     b(l1m0,n_r)=b_pol*or1(n_r)                
+                  endif
+               else
+                  b(l1m0,n_r)=b(l1m0,n_r)+b_pol*or1(n_r)
+               endif
+!--------------------------------------------------PW
             end do
             if ( l_cond_ic ) then
                do n_r=1,n_r_ic_max
-                  b_ic(l1m0,n_r)=b_ic(l1m0,n_r)+b_pol/r_icb* &
+!                  b_ic(l1m0,n_r)=b_ic(l1m0,n_r)+b_pol/r_icb* &
+!                                 ( -three*half + half*(r_ic(n_r)/r_icb)**2 )
+!--------------------------------------------------PW
+                  if (imagcon == -1) then
+                     if (l_start_file) then
+                        b_ic(l1m0,n_r)=b_ic(l1m0,n_r)
+                     else !no restart file, analytical solution (might be wrong)
+                        b_ic(l1m0,n_r)= b_pol/r_icb* (r_ic(n_r)/r_icb)**2 
+                     endif
+                  else
+                     b_ic(l1m0,n_r)=b_ic(l1m0,n_r)+b_pol/r_icb* &
                                  ( -three*half + half*(r_ic(n_r)/r_icb)**2 )
+                  endif
+!--------------------------------------------------PW
                end do
-            end if
+            endif
+!--------------------------------------------------PW
+            !write(*,*) 'poloidal field calculated'
+            !open(newunit=fileHandle, file='bpol_analytical.dat', status='replace')
+            !do n_r=1,n_r_max
+               !write(*,*) r(n_r), SNGL(real(b(l1m0,n_r)))
+               !write(fileHandle,*) r(n_r), SNGL(real(b(l1m0,n_r)))
+            !end do
+            !do n_r=1,n_r_ic_max
+               !write(*,*) r_ic(n_r), SNGL(real(b_ic(l1m0,n_r)))
+               !write(fileHandle,'(7ES16.8)') r_ic(n_r), SNGL(real(b_ic(l1m0,n_r)))
+            !end do
+            !close(filehandle)
+!--------------------------------------------------PW
          end if
 
       else if ( init_b1 == 5 ) then  ! l=1,m0 poloidal field

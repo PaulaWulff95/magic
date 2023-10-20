@@ -107,6 +107,7 @@ contains
       if ( l_heat ) lSmat(:) =.false.
       lZmat(:) =.false.
       if ( l_mag ) lBmat(:) =.false.
+      if ( l_mag ) lB10mat =.false.
       if ( l_chemical_conv ) lXimat(:)=.false.
 
 #ifdef WITH_MPI
@@ -205,6 +206,7 @@ contains
          end if
          lZmat(:) =.false.
          if ( l_mag ) lBmat(:) =.false.
+         if ( l_mag ) lB10mat =.false.
          if ( l_chemical_conv ) lXimat(:)=.false.
          if ( l_phase_field ) lPhimat(:)=.false.
       end if
@@ -292,6 +294,7 @@ contains
          if ( l_heat ) lSmat(:) =.false.
          lZmat(:) =.false.
          if ( l_mag ) lBmat(:) =.false.
+         if ( l_mag ) lB10mat =.false.
          if ( l_chemical_conv ) lXimat(:)=.false.
          if ( l_phase_field ) lPhimat(:)=.false.
       end if

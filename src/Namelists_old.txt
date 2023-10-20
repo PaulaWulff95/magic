@@ -725,10 +725,6 @@ contains
       if ( ( l_rot_ma .and. ktopv == 2 ) .or. &
       &    ( l_rot_ic .and. kbotv == 2 )      ) l_z10mat= .true.
 
-      !-- Special matrix for b(l=1,m=0) if axial dip. at icb & conducting IC:
-      l_b10mat=.false.
-      if ( imagcon == -1 .and. kbotb == 3 ) l_b10mat= .true.
-
       !-- Check whether memory has been reserved:
       if ( l_TO ) lStressMem=1
       if ( l_RMS .or. l_DTrMagSpec ) ldtBMem=1

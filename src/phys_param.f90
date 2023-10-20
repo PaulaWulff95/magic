@@ -91,6 +91,11 @@ module physical_parameters
    real(cp) :: con_LambdaMatch ! Electrical conductivity at con_RadRatio (nVarCond=2)
    real(cp) :: con_LambdaOut  ! nVarCond=1
    real(cp) :: con_FuncWidth  ! nVarCond=1
+!-------------------------PW
+   real(cp) :: aCond          ! nVarCond=5
+   real(cp) :: bCond          ! nVarCond=5
+   real(cp) :: rSSL           ! nVarCond=5
+!-------------------------PW
    real(cp) :: r_LCR          ! Radius beyond which conductivity is zero
    integer :: n_r_LCR         ! Number of radial points where conductivity is zero
    integer :: nVarDiff        ! Selection of variable diffusivity profile

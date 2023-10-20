@@ -463,6 +463,7 @@ contains
          do nTheta=1,n_theta_max
             nThetaNHS=(nTheta+1)/2 ! northern hemisphere=odd n_theta
             if ( lGrenoble ) then
+!            if ( lGrenoble or l_b10Mat ) then
                if ( r(nR) == r_icb ) then
                   b0r=two*BIC*r_icb**2*cosTheta(nTheta)
                else if ( r(nR) == r_cmb ) then

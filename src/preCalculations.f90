@@ -32,7 +32,7 @@ module preCalculations
        &                          ktops, kbots, interior_model, r_LCR,     &
        &                          n_r_LCR, mode, tmagcon, oek, Bn,         &
        &                          ktopxi, kbotxi, epscxi, epscxi0, sc, osc,&
-       &                          ChemFac, raxi, Po, prec_angle
+       &                          ChemFac, raxi, Po, prec_angle, nVarEntropyGrad
    use horizontal_data, only: horizontal
    use integration, only: rInt_R
    use useful, only: logWrite, abortRun
@@ -194,7 +194,7 @@ contains
 
       call transportProperties
 
-      if ( ( l_anel .or. l_non_adia ) .and. ( rank == 0 ) ) then
+      if ( ( l_anel .or. l_non_adia .or. nVarEntropyGrad == 6 .or. nVarEntropyGrad == 7 .or. nVarEntropyGrad == 8) .and. ( rank == 0 ) ) then
          ! Write the equilibrium setup in anel.tag
          fileName='anel.'//tag
          open(newunit=fileHandle, file=fileName, status='unknown')
@@ -222,7 +222,7 @@ contains
          close(fileHandle)
       end if
 
-      if ( ( l_heat .and. nVarDiff > 0  .or. nVarVisc > 0) .and. ( rank == 0 ) ) then
+      if ( ( l_heat .and. nVarDiff > 0  .or. nVarVisc > 0 .or. nVarEntropyGrad == 7 .or. nVarEntropyGrad == 8) .and. ( rank == 0 ) ) then
          fileName='varDiff.'//tag
          open(newunit=fileHandle, file=fileName, status='unknown')
          write(fileHandle,'(5a15)') 'radius', 'conductivity', 'kappa', &
@@ -773,7 +773,7 @@ contains
          n_time_step=0
       end if
 
-      tmagcon=tmagcon+time
+      !tmagcon=tmagcon+time
 
       !-- Get output times:
       call get_hit_times(t_graph,n_time_hits,n_t_graph,l_time, &

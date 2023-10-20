@@ -196,6 +196,24 @@ contains
       real(cp) :: Sr(nlat_padded,n_phi_max),Prer(nlat_padded,n_phi_max)
       real(cp) :: Xir(nlat_padded,n_phi_max),Phir(nlat_padded,n_phi_max)
 
+!################################################################################
+!Reynolds and Maxwell Stress crap
+!      real(cp) :: VrRey(nlat_padded,n_phi_max),VtRey(nlat_padded,n_phi_max) ! V field comp.
+!      real(cp) :: VpRey(nlat_padded,n_phi_max),VrRey_(nlat_padded,n_phi_max)
+!      real(cp) :: VtRey_(nlat_padded,n_phi_max),VpRey_(nlat_padded,n_phi_max)
+!      real(cp) :: VsRey_(nlat_padded,n_phi_max),VzRey_(nlat_padded,n_phi_max)
+!      real(cp) :: ReyR(n_r_max,nlat_padded),ReyT(n_r_max,nlat_padded)
+!      real(cp) :: ReyS(n_r_max,nlat_padded), ReyZ(n_r_max,nlat_padded)
+!      real(cp) :: ReyR_ave(n_r_max,nlat_padded),ReyT_ave(n_r_max,nlat_padded)
+!      real(cp) :: ReyS_ave(n_r_max,nlat_padded), ReyZ_ave(n_r_max,nlat_padded)
+!      real(cp) :: ReyR_ave_out(n_r_max,nlat_padded),ReyT_ave_out(n_r_max,nlat_padded)
+!      real(cp) :: ReyS_ave_out(n_r_max,nlat_padded),ReyZ_ave_out(n_r_max,nlat_padded)
+!      complex(cp) :: w_Rey_global(1:lm_max), dw_Rey_global(1:lm_max), z_Rey_global(1:lm_max)
+!      complex(cp) :: w_Rey(llm:ulm,n_r_max), dw_Rey(llm:ulm,n_r_max), z_Rey(llm:ulm,n_r_max)
+!      integer :: ntheta
+!      real(cp) :: fac,fac_r
+!################################################################################
+
       !----- Energies of time average field:
       real(cp) :: e_kin_p_ave,e_kin_t_ave
       real(cp) :: e_kin_p_as_ave,e_kin_t_as_ave
@@ -234,6 +252,41 @@ contains
             aj_ic_ave(:,:)=aj_ic_ave(:,:)+ time_passed*aj_ic(:,:)
          end if
       end if
+
+!################################################################################
+
+!      w_Rey = w
+!      z_Rey = z
+!      call get_dr(w_Rey,dw_Rey,ulm-llm+1,1,ulm-llm+1,n_r_max,rscheme_oc, &
+!           &      nocopy=.true.)
+!      do nR=1,n_r_max
+!         call gather_from_lo_to_rank0(w_Rey(llm,nR),w_Rey_global)
+!         call gather_from_lo_to_rank0(dw_Rey(llm,nR),dw_Rey_global)
+!         call gather_from_lo_to_rank0(z_Rey(llm,nR),z_Rey_global)
+!         if ( rank == 0 ) then
+!            call torpol_to_spat(w_Rey_global, dw_Rey_global, &
+!                 &              z_Rey_global, VrRey, VtRey, VpRey)
+!            fac_r=or2(nR)*vScale*orho1(nR)
+!            do ntheta = 1, sizeThetaB
+!               fac=or1(nR)*vScale*orho1(nR)*O_sin_theta(ntheta)
+!               VrRey_(:, ntheta) = fac_r * (VrRey(:, ntheta) - SUM(VrRey(:, ntheta))/ float(nrp))
+!               VpRey_(:, ntheta) = fac * (VpRey(:, ntheta) - SUM(VpRey(:, ntheta))/ float(nrp))
+!               VtRey_(:, ntheta) = fac * (VtRey(:, ntheta) - SUM(VtRey(:, ntheta))/ float(nrp))
+!               VsRey_(:, ntheta) = VrRey_(:, ntheta) * sin(theta(ntheta)) + VtRey_(:, ntheta) * cos(theta(ntheta))
+!               VzRey_(:, ntheta) = VrRey_(:, ntheta) * cos(theta(ntheta)) - VtRey_(:, ntheta) * sin(theta(ntheta))
+!               ReyR(nR, ntheta) = SUM(VrRey_(:, ntheta)*VpRey_(:, ntheta))/ float(nrp)
+!               ReyT(nR, ntheta) = SUM(VtRey_(:, ntheta)*VpRey_(:, ntheta))/ float(nrp)
+!               ReyS(nR, ntheta) = SUM(VsRey_(:, ntheta)*VpRey_(:, ntheta))/ float(nrp)
+!               ReyZ(nR, ntheta) = SUM(VzRey_(:, ntheta)*VpRey_(:, ntheta))/ float(nrp)
+!            end do
+!         end if
+!      end do
+!      ReyR_ave = ReyR_ave + time_passed * ReyR
+!      ReyT_ave = ReyT_ave + time_passed * ReyT
+!      ReyS_ave = ReyS_ave + time_passed * ReyS
+!      ReyZ_ave = ReyZ_ave + time_passed * ReyZ
+
+!################################################################################
 
       !--- Output, intermediate output every 10th averaging to save result
       !    will be overwritten.
@@ -409,6 +462,40 @@ contains
             call graphOut(nR, Vr, Vt, Vp, Br, Bt, Bp, Sr, Prer, Xir, Phir)
 #endif
          end do
+
+!################################################################################
+
+!         if ( rank == 0 ) then
+!            ReyR_ave_out = ReyR_ave / time_norm
+!            ReyT_ave_out = ReyT_ave / time_norm
+!            ReyS_ave_out = ReyS_ave / time_norm
+!            ReyZ_ave_out = ReyZ_ave / time_norm
+!            !write(*,*) 'output step', time_norm, ReyR_ave(10,10), ReyR_ave_out(10,10)
+!            open (12, file='ReyStress_sph.'//tag,  status = 'Replace')
+!            do nR = 1, n_r_max
+!               do ntheta = 1, nfs, 2
+!                  write(12,'(7ES12.4)') r(nR), theta(ntheta), ReyR_ave_out(nR, ntheta), ReyT_ave_out(nR, ntheta)
+!               end do
+!               do ntheta = nfs, 2, -2
+!                  write(12,'(7ES12.4)') r(nR), theta(ntheta), ReyR_ave_out(nR, ntheta), ReyT_ave_out(nR, ntheta)
+!               end do
+!               write(12, *)
+!            end do
+!            close (12)
+!            open (13, file='ReyStress_cyl.'//tag,  status = 'Replace')
+!            do nR = 1, n_r_max
+!               do ntheta = 1, nfs, 2
+!                  write(13,'(6ES12.4)') r(nR), theta(ntheta), ReyS_ave_out(nR, ntheta), ReyZ_ave_out(nR, ntheta)
+!               end do
+!               do ntheta = nfs, 2, -2
+!                  write(13,'(6ES12.4)') r(nR), theta(ntheta), ReyS_ave_out(nR, ntheta), ReyZ_ave_out(nR, ntheta)
+!               end do
+!               write(13, *)
+!            end do
+!            close (13)
+!         end if
+
+!################################################################################
 
          !----- Inner core: Transform is included in graphOut_IC!
          if ( l_mag .and. n_r_ic_max > 0 ) then

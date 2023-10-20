@@ -24,7 +24,7 @@ module updateB_mod
    use horizontal_data, only: hdif_B
    use logic, only: l_cond_ic, l_LCR, l_rot_ic, l_mag_nl, l_b_nl_icb, &
        &            l_b_nl_cmb, l_update_b, l_RMS, l_finite_diff,     &
-       &            l_full_sphere, l_mag_par_solve, l_b10Mat
+       &            l_full_sphere, l_mag_par_solve
    use RMS, only: dtBPolLMr, dtBPol2hInt, dtBTor2hInt
    use constants, only: pi, zero, one, two, three, half
    use special, only: n_imp, l_imp, amp_imp, expo_imp, bmax_imp, rrMP, l_curr, &
@@ -53,14 +53,12 @@ module updateB_mod
    complex(cp), allocatable :: work_ic_LMloc(:,:)
    real(cp), allocatable :: rhs1(:,:,:),rhs2(:,:,:)
    complex(cp), allocatable :: dtT(:), dtP(:)
-   class(type_realmat), pointer :: bMat(:), jMat(:), b10Mat
+   class(type_realmat), pointer :: bMat(:), jMat(:)
 #ifdef WITH_PRECOND_BJ
    real(cp), allocatable :: bMat_fac(:,:)
    real(cp), allocatable :: jMat_fac(:,:)
-   real(cp), allocatable :: b10Mat_fac(:)
 #endif
    logical, public, allocatable :: lBmat(:)
-   logical, public :: lB10mat
    type(type_tri_par), public :: bMat_FD, jMat_FD
    complex(cp), allocatable, public :: b_ghost(:,:), aj_ghost(:,:)
 
@@ -124,9 +122,7 @@ contains
          else
             allocate( type_densemat :: jMat(nLMBs2(1+rank)) )
             allocate( type_densemat :: bMat(nLMBs2(1+rank)) )
-            allocate( type_densemat :: b10Mat )
 
-            call b10Mat%initialize(n_r_max,n_r_max,l_pivot=.true.)
             do ll=1,nLMBs2(1+rank)
                call bMat(ll)%initialize(n_r_tot,n_r_tot,l_pivot=.true.)
                call jMat(ll)%initialize(n_r_tot,n_r_tot,l_pivot=.true.)
@@ -136,9 +132,7 @@ contains
 #ifdef WITH_PRECOND_BJ
          allocate(bMat_fac(n_r_tot,nLMBs2(1+rank)))
          allocate(jMat_fac(n_r_tot,nLMBs2(1+rank)))
-         allocate(b10Mat_fac(n_r_max))
          bytes_allocated = bytes_allocated+2*n_r_tot*nLMBs2(1+rank)*SIZEOF_DEF_REAL
-         bytes_allocated = bytes_allocated+n_r_max*SIZEOF_DEF_REAL
 #endif
 
          if ( l_RMS ) then
@@ -220,12 +214,11 @@ contains
             call jMat(ll)%finalize()
             call bMat(ll)%finalize()
          end do
-         call b10Mat%finalize()
 
          if ( l_cond_ic ) deallocate ( work_ic_LMloc )
 
 #ifdef WITH_PRECOND_BJ
-         deallocate(bMat_fac,jMat_fac, b10Mat_fac)
+         deallocate(bMat_fac,jMat_fac)
 #endif
          deallocate( rhs1, rhs2 )
       else
@@ -279,9 +272,7 @@ contains
       integer :: lmStart_00          ! excluding l=0,m=0
       integer :: nLMB2, nLMB
       integer :: n_r_out             ! No of cheb polynome (degree+1)
-      complex(cp) :: rhs(n_r_max)   ! RHS of matrix multiplication, just for imagcon=-1 and cond_ic
       integer :: nR                  ! No of radial grid point
-!      logical :: l_b10Mat            !do we need to solve the 1,0 mode differently?
 
       integer, pointer :: nLMBs2(:),lm2l(:),lm2m(:)
       integer, pointer :: sizeLMB2(:,:),lm2(:,:)
@@ -354,18 +345,6 @@ contains
 #endif
                lBmat(l1)=.true.
             end if
-            if ( l_b10mat .and. l1==1 ) then
-               !----- Special treatment of b10 component if conducting ic and
-               !      holding m=0, l=1 mode at icb (l_b10mat=.true.)
-               if ( .not. lB10mat ) then
-#ifdef WITH_PRECOND_BJ
-                   call get_b10Mat(tscheme,l1,hdif_B(l1),b10Mat, b10Mat_fac)
-#else
-                   call get_b10Mat(tscheme,l1,hdif_B(l1),b10Mat)
-#endif
-                   lB10mat=.true.
-               end if
-            end if
          end if
 
          do iChunk=1,nChunks
@@ -412,8 +391,7 @@ contains
                      !write(*,*) "tmagcon", tmagcon
 !                     if ( imagcon /= 0 .and. tmagcon <= time ) then
                      if ( imagcon /= 0) then
-!                        if ( l_LCR ) then
-                        if ( l_LCR .and. imagcon /= -1) then
+                        if ( l_LCR ) then
                            call abortRun('LCR not compatible with imposed field!')
                         end if
                         if ( l1 == 2 .and. imagcon > 0 .and. imagcon  /=  12 ) then
@@ -571,6 +549,7 @@ contains
                   if ( l_cond_ic ) then    ! inner core
                      rhs1(n_r_max+1,2*lmB-1,threadid)=0.0_cp
                      rhs1(n_r_max+1,2*lmB,threadid)  =0.0_cp
+!                     write(*, *)"I've reached here"
                      if ( l_b_nl_icb ) then
                         rhs2(n_r_max+1,2*lmB-1,threadid)=real( &
                         &                        aj_nl_icb(st_map%lm2(l1,m1)) )
@@ -595,14 +574,7 @@ contains
 
             if ( lmB > lmB0 ) then
                !write(*,"(2(A,I5))") "updateB: Calling cgeslML for l1=",l1," WITH lmB=",lmB
-               if (l_b10Mat) then
-                  rhs(:) = rhs1(1:n_r_max, 2*(lmB0+1)-1, threadid)
-                  !write(*,*) 'rhs', rhs
-               end if
 #ifdef WITH_PRECOND_BJ
-               if (l_b10Mat) then
-                  rhs(:) = rhs(:)*b10Mat_fac(:)
-               end if
                do lm=lmB0+1,lmB
                   do nR=1,n_r_tot
                      rhs1(nR,2*lm-1,threadid)=rhs1(nR,2*lm-1,threadid)*bMat_fac(nR,nLMB2)
@@ -614,9 +586,6 @@ contains
 #endif
 
                !LIKWID_ON('upB_sol')
-               if (l_b10Mat) then
-                  call b10Mat%solve(rhs)
-               end if
                call bMat(nLMB2)%solve(rhs1(:,2*(lmB0+1)-1:2*lmB,threadid), &
                     &                 2*(lmB-lmB0))
                call jMat(nLMB2)%solve(rhs2(:,2*(lmB0+1)-1:2*lmB,threadid), &
@@ -661,7 +630,6 @@ contains
                         end do
                      end if
                   else
-                     !if ( l1 == 1 ) write(*,*) 'lm1 for m=0, l=1', lm1
                      do n_r_out=1,rscheme_oc%n_max   ! outer core
                         b(lm1,n_r_out) = cmplx(rhs1(n_r_out,2*lmB-1,threadid), &
                         &                      0.0_cp,kind=cp)
@@ -676,11 +644,6 @@ contains
                            &                   threadid),0.0_cp,kind=cp)
                         end do
                      end if
-                     if ( l_b10Mat .and. l1 == 1) then
-                        b(lm1, :) = cmplx(real(rhs(:)), 0.0_cp, kind=cp)
-                        b_ic(lm1, :) = zero
-                     end if
-!                     write (*,*) 'b2', b(121, :)
                   end if
 
                end if
@@ -753,7 +716,6 @@ contains
          end if
 
       end if
-      !write (*,*) 'b2', b(135, n_r_max)
 
    end subroutine updateB
 !-----------------------------------------------------------------------------
@@ -2199,183 +2161,6 @@ contains
       if ( info /= 0 ) call abortRun('! Singular matrix jMat in get_bmat!')
 
    end subroutine get_bMat
-!-----------------------------------------------------------------------------
-#ifdef WITH_PRECOND_BJ
-   subroutine get_b10Mat(tscheme,l,hdif,b10Mat,b10Mat_fac)
-#else
-   subroutine get_b10Mat(tscheme,l,hdif,b10Mat)
-#endif
-      !
-      !  Purpose of this subroutine is to contruct the time step matrix
-      !  ``b10mat(i,j)`` for the poloidal magnetic potential b of degree
-      !  :math:`\ell=1` and order :math:`m=0`.
-      !  This differs from the the normal bmat only if we implement an
-      !  axial dipole at the icb and have a conducting core.
-      !  (``kbotb=3`` and ``imagcon=-1``).
-      !
-
-      !-- Input variables:
-      class(type_tscheme), intent(in) :: tscheme        ! time step
-      integer,             intent(in) :: l
-      real(cp),            intent(in) :: hdif
-
-      !-- Output variables:
-      class(type_realmat), intent(inout) :: b10Mat
-#ifdef WITH_PRECOND_BJ
-      real(cp), intent(out) :: b10Mat_fac(n_r_maxMag)
-#endif
-
-      !-- local variables:
-      integer :: nR,nCheb,nR_out,nRall
-      integer :: info
-      real(cp) :: l_P_1
-      real(cp) :: dLh
-      real(cp) :: rRatio
-      real(cp) :: datBmat(n_r_max,n_r_max)
-
-      nRall=n_r_max
-!      if ( l_cond_ic ) nRall=nRall+n_r_ic_max
-      dLh=real(l*(l+1),kind=cp)
-
-      !-- matrices depend on degree l but not on order m,
-      !   we thus have to construct bmat and ajmat for each l:
-
-      l_P_1=real(l+1,kind=cp)
-
-      do nR_out=1,n_r_max
-         do nR=2,n_r_max-1
-            datBmat(nR,nR_out)=                       rscheme_oc%rnorm * (  &
-            &                 dLh*or2(nR)*rscheme_oc%rMat(nR,nR_out) -      &
-            &    tscheme%wimp_lin(1)*opm*lambda(nR)*hdif*dLh*or2(nR) * (    &
-            &                                rscheme_oc%d2rMat(nR,nR_out) - &
-            &                      dLh*or2(nR)*rscheme_oc%rMat(nR,nR_out) ) )
-         end do
-      end do
-
-      if  ( l_LCR ) then
-         do nR=2,n_r_max-1
-            if ( nR<=n_r_LCR ) then
-               do nR_out=1,n_r_max
-                  datBmat(nR,nR_out)= rscheme_oc%rnorm*(                    &
-                  &                           rscheme_oc%drMat(nR,nR_out) + &
-                  &    real(l,kind=cp)*or1(nR)*rscheme_oc%rMat(nR,nR_out) )
-               end do
-            end if
-         end do
-      end if
-
-      !----- boundary conditions for outer core field:
-      if ( ktopb == 1 .or. ktopb == 3 ) then
-         !-------- at CMB (nR=1):
-         !         the internal poloidal field should fit a potential
-         !         field (matrix bmat) and the toroidal field has to
-         !         vanish (matrix ajmat).
-
-         datBmat(1,1:n_r_max)=    rscheme_oc%rnorm * (   &
-         &                      rscheme_oc%drMat(1,:) +  &
-         &     real(l,cp)*or1(1)*rscheme_oc%rMat(1,:) +  &
-         &                     conductance_ma* (         &
-         &                     rscheme_oc%d2rMat(1,:) -  &
-         &            dLh*or2(1)*rscheme_oc%rMat(1,:) ) )
-      else if ( ktopb == 2 ) then
-         !----- perfect conductor
-         !      see Glatzmaier, JCP 55, 461-484 (1984)
-         ! the (extra) condition Br=0 on Bpol is imposed just
-         ! below the boundary
-         datBmat(1,1:n_r_max)=rscheme_oc%rnorm*  rscheme_oc%rMat(1,:)
-         datBmat(2,1:n_r_max)=rscheme_oc%rnorm*rscheme_oc%d2rMat(1,:)
-      else if ( ktopb == 4 ) then
-         !----- pseudo vacuum condition, field has only
-         !      a radial component, horizontal components
-         !      vanish when aj and db are zero:
-         datBmat(1,1:n_r_max)=rscheme_oc%rnorm*rscheme_oc%drMat(1,:)
-      end if
-
-      !-------- Imposed fields axial dipole at ri: (overwrites above IC boundary cond.)
-      datBmat(n_r_max,1:n_r_max)=rscheme_oc%rnorm * rscheme_oc%rMat(n_r_max,:)
-
-      !----- fill up with zeros:
-      do nR_out=rscheme_oc%n_max+1,n_r_max
-         datBmat(1,nR_out)=0.0_cp
-         if ( ktopb == 2 ) then
-            datBmat(2,nR_out)=0.0_cp
-         end if
-
-         if ( l_LCR ) then
-            do nR=2,n_r_LCR
-               datBmat(nR,nR_out)=0.0_cp
-            end do
-         end if
-
-         datBmat(n_r_max,nR_out)  =0.0_cp
-      end do
-
-      !----- normalization for highest and lowest Cheb mode:
-      do nR=1,n_r_max
-         datBmat(nR,1)      =rscheme_oc%boundary_fac*datBmat(nR,1)
-         datBmat(nR,n_r_max)=rscheme_oc%boundary_fac*datBmat(nR,n_r_max)
-      end do
-
-#ifdef WITH_PRECOND_BJ
-      ! compute the linesum of each line
-      do nR=1,nRall
-         b10Mat_fac(nR)=one/maxval(abs(datBmat(nR,1:nRall)))
-         datBmat(nR,:) = datBmat(nR,:)*b10Mat_fac(nR)
-      end do
-#endif
-
-#undef MATRIX_CHECK
-#ifdef MATRIX_CHECK
-      block
-
-      integer :: i,j
-      real(cp) :: rcond
-      integer ::ipiv(n_r_tot),iwork(n_r_tot)
-      real(cp) :: work(4*n_r_tot),anorm,linesum
-      real(cp) :: temp_Mat(n_r_tot,n_r_tot)
-      integer, save :: counter=0
-      integer :: filehandle
-      character(len=100) :: filename
-
-      ! copy the bMat to a temporary variable for modification
-      write(filename,"(A,I3.3,A,I3.3,A)") "b10Mat_",l,"_",counter,".dat"
-      open(newunit=filehandle,file=trim(filename))
-      counter= counter+1
-
-      do i=1,n_r_tot
-         do j=1,n_r_tot
-            write(filehandle,"(2ES20.12,1X)",advance="no") datBmat(i,j)
-         end do
-         write(filehandle,"(A)") ""
-      end do
-      close(filehandle)
-      temp_Mat=datBmat
-      anorm = 0.0_cp
-      do i=1,n_r_tot
-         linesum = 0.0_cp
-         do j=1,n_r_tot
-            linesum = linesum + abs(temp_Mat(i,j))
-         end do
-         if (linesum  >  anorm) anorm=linesum
-      end do
-      !write(*,"(A,ES20.12)") "anorm = ",anorm
-      ! LU factorization
-      call dgetrf(n_r_tot,n_r_tot,temp_Mat,n_r_tot,ipiv,info)
-      ! estimate the condition number
-      call dgecon('I',n_r_tot,temp_Mat,n_r_tot,anorm,rcond,work,iwork,info)
-      write(*,"(A,I3,A,ES11.3)") "inverse condition number of b10Mat for l=",l," is ",rcond
-
-      end block
-#endif
-
-      !-- Array copy
-      call b10Mat%set_data(datBmat)
-
-      !----- LU decomposition:
-      call b10Mat%prepare(info)
-      if ( info /= 0 ) call abortRun('Singular matrix bMat in get_bmat')
-
-   end subroutine get_b10Mat
 !-----------------------------------------------------------------------------
    subroutine get_bMat_Rdist(tscheme,hdif,bMat,jMat)
       !

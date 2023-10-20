@@ -44,6 +44,8 @@ module radial_functions
    real(cp), public, allocatable :: otemp1(:)    ! Inverse of background temperature
    real(cp), public, allocatable :: rho0(:)      ! Inverse of background density
    real(cp), public, allocatable :: temp0(:)     ! Background temperature
+!   real(cp), public, allocatable :: temperature_PW(:)     ! auxiliary Background temperature
+!   real(cp), public, allocatable :: density_PW(:)     ! auxiliary Background density
    real(cp), public, allocatable :: dLtemp0(:)   ! Inverse of temperature scale height
    real(cp), public, allocatable :: ddLtemp0(:)  ! :math:`d/dr(1/T dT/dr)`
    real(cp), private, allocatable :: d2temp0(:)  ! Second rad. derivative of background temperature
@@ -65,6 +67,7 @@ module radial_functions
    real(cp), public :: r_cmb                     ! OC radius
    real(cp), public :: r_icb                     ! IC radius
    real(cp), public :: r_surface                 ! Surface radius for extrapolation in units of (r_cmb-r_icb)
+   real(cp), public :: qo                        ! helpful parameter for defining a deep SSL
 
    !-- arrays for buoyancy, depend on Ra and Pr:
    real(cp), public, allocatable :: rgrav(:)     ! Buoyancy term `dtemp0/Di`
@@ -122,7 +125,7 @@ contains
       allocate( O_r_ic(n_r_ic_max) )
       allocate( O_r_ic2(n_r_ic_max) )
       allocate( or1(n_r_max),or2(n_r_max),or3(n_r_max),or4(n_r_max) )
-      allocate( otemp1(n_r_max),rho0(n_r_max),temp0(n_r_max) )
+      allocate( otemp1(n_r_max),rho0(n_r_max),temp0(n_r_max))!,temperature_PW(n_r_max),density_PW(n_r_max) )
       allocate( dLtemp0(n_r_max),d2temp0(n_r_max),dentropy0(n_r_max) )
       allocate( ddLtemp0(n_r_max) )
       allocate( orho1(n_r_max),orho2(n_r_max) )
@@ -194,7 +197,7 @@ contains
 
       deallocate( l_R )
       deallocate( r, r_ic, O_r_ic, O_r_ic2, or1, or2, or3, or4 )
-      deallocate( otemp1, rho0, temp0, dLtemp0, d2temp0, dentropy0 )
+      deallocate( otemp1, rho0, temp0, dLtemp0, d2temp0, dentropy0)!, temperature_PW, density_PW )
       deallocate( ddLtemp0, orho1, orho2, beta, dbeta, ddbeta, alpha0 )
       deallocate( ddLalpha0, dLalpha0, rgrav, ogrun )
       deallocate( lambda, dLlambda, jVarCon, sigma, kappa, dLkappa )
@@ -873,7 +876,7 @@ contains
       !real(cp) :: condBot(n_r_max), condTop(n_r_max)
       !real(cp) :: func(n_r_max)
       real(cp) :: kcond(n_r_max)
-      real(cp) :: a0,a1,a2,a3,a4,a5
+      real(cp) :: a0,a1,a2,a3,a4,a5!, aCond, bCond, rSSL
       real(cp) :: kappatop,rrOcmb, ampVisc, ampKap, slopeVisc, slopeKap
 
       !-- Variable conductivity:
@@ -935,6 +938,81 @@ contains
              sigma=one/lambda
              call get_dr(lambda,dsigma,n_r_max,rscheme_oc)
              dLlambda=dsigma/lambda
+          else if ( nVarCond == 5 ) then ! URC exponential
+             if (bCond < (1e7/aCond)) then
+                 lambda=aCond*exp(log(bCond)*(r-r_icb))
+                 dLlambda= log(bCond)
+             else
+                 do n_r=1,n_r_max
+                 if ( r(n_r) < (log(1e7/aCond)/log(bCond) + r_icb )) then
+                     lambda(n_r) = aCond*exp(log(bCond)*(r(n_r)-r_icb))
+                     dLlambda(n_r)= log(bCond)
+                 else
+                     lambda(n_r) = 1e7
+                     dLlambda(n_r)= 0.0_cp
+                 end if
+                 end do
+             end if
+             sigma=one/lambda
+          else if ( nVarCond == 6 ) then ! PW adapted nVarCond2
+             r0=con_radratio*r_cmb
+             b =-log(con_DecRate)
+             !------ Use grid point closest to r0:
+             do n_r=1,n_r_max
+                if ( r(n_r) < r0 )then
+                   r0=r(n_r)
+                   exit
+                end if
+             end do
+             dsigma0=(con_LambdaMatch-1)*b /(r0-r_icb)
+             do n_r=1,n_r_max
+                if ( r(n_r) < r0 ) then
+                   sigma(n_r)   = one+(con_LambdaMatch-1)* &
+                       ( (r(n_r)-r_icb)/(r0-r_icb) )**b
+                   dsigma(n_r)  =  dsigma0 * &
+                       ( (r(n_r)-r_icb)/(r0-r_icb) )**(b-1)
+                   dLlambda(n_r)=-dsigma(n_r)/sigma(n_r)
+                else if ( r(n_r) >= (r0+con_LambdaMatch*log(1e-7/con_LambdaMatch)/dsigma0 )) then
+                   sigma(n_r) = 1e-7
+                   dsigma(n_r)= 0.0_cp
+                   dLlambda(n_r)= 0.0_cp
+                else
+                   sigma(n_r)  =con_LambdaMatch * &
+                       exp(dsigma0/con_LambdaMatch*(r(n_r)-r0))
+                   dsigma(n_r) = dsigma0* &
+                       exp(dsigma0/con_LambdaMatch*(r(n_r)-r0))
+                   dLlambda(n_r)=-dsigma(n_r)/sigma(n_r)
+                end if
+                lambda(n_r)  = one/sigma(n_r)
+
+!             r0=con_radratio
+!             b =1/log(con_DecRate)
+!             a =(r0-r_icb)/b/(1-con_LambdaMatch)
+             !------ Use grid point closest to r0:
+!             do n_r=1,n_r_max
+!                if ( r(n_r) < r0 )then
+!                   r0=r(n_r)
+!                   exit
+!                end if
+!             end do
+!             dsigma0=(con_LambdaMatch-1)*a /(r0-r_icb)
+!             do n_r=1,n_r_max
+!                if ( r(n_r) < r0 ) then
+!                   sigma(n_r)   = one+(con_LambdaMatch-1)* &
+!                       ( (r(n_r)-r_icb)/(r0-r_icb) )**a
+!                   dsigma(n_r)  =  dsigma0 * &
+!                       ( (r(n_r)-r_icb)/(r0-r_icb) )**(a-1)
+!                else if ( r(n_r) >= (r0-log(1e-7*con_LambdaMatch)/log(con_DecRate) )) then
+!                   sigma(n_r) = 1e-7
+!                   dsigma(n_r)= 0.0_cp
+!                else
+!                   sigma(n_r)  =con_LambdaMatch * exp((r0-r(n_r))/b)
+!                   dsigma(n_r) = dsigma0* &
+!                       exp(dsigma0/con_LambdaMatch*(r(n_r)-r0))
+!                end if
+!                lambda(n_r)  = one/sigma(n_r)
+!                dLlambda(n_r)=-dsigma(n_r)/sigma(n_r)
+             end do
           end if
       end if
 
@@ -1074,6 +1152,11 @@ contains
          else
             epscProf(:)=rho0(:)**2*temp0(:)**(-4)*exp(-Bn/temp0(:))
          end if
+!----------------------------------------------------------------------------
+      else if ( nVarEps == 4 ) then
+         ! eps*rho**2*temp**(-3)*exp(-Bn/T) in the RHS
+         epscProf(:)=rho0(:)**2*temp0(:)**(-4)*exp(-Bn/temp0(:))
+!----------------------------------------------------------------------------
       end if
 
       !-- Variable viscosity
@@ -1229,6 +1312,72 @@ contains
       else if ( nVarEntropyGrad == 5 ) then ! uniform volumic heat without strat
          dentropy0(:) = (r(:)**3-r_cmb**3)/(r_cmb**3 -r_icb**3)*(r_icb/r(:))**2
          l_non_adia = .true.
+!---------------------------------------------------------------PW
+      else if ( nVarEntropyGrad == 6 ) then ! deep SSL, polynomial transition URC
+         !let's assume constant kappa here
+         !temperature_PW(:)=-DissNb*( g0*r(:)+half*g1*r(:)**2/r_cmb-   &
+         !&              g2*r_cmb**2*or1(:) ) + one + DissNb*r_cmb* &
+         !&              (g0+half*g1-g2)
+         !density_PW(:) =temperature_PW**polind
+         qo = 105. * r_icb**2 * (ampStrat - 120)/pr/16./slopeStrat/(slopeStrat**2+7.*rStrat**2) + 6490.0
+         if ( rStrat <= r_icb ) then
+            dentropy0(:) = (120.*r_icb**2 - 16.*pr/105.*qo*slopeStrat*(slopeStrat**2+7*rStrat**2))&
+            &              / r(n_r)**2 !/ temperature_PW(n_r) / density_PW(n_r)
+         else
+            do n_r=1,n_r_max
+               if ( r(n_r) <= rStrat-slopeStrat) then
+                  dentropy0(n_r)= ampStrat * r_icb**2/ r(n_r)**2 
+               else if ( r(n_r) >= rStrat+slopeStrat) then
+                  dentropy0(n_r)= (ampStrat*r_icb**2 - 16.*pr/105.*qo*slopeStrat*(slopeStrat**2+7*rStrat**2))&
+                  &               / r(n_r)**2 
+               else
+                  dentropy0(n_r)= qo*pr*(105*ampStrat*r_icb**2/qo/pr + 35.*rStrat**3-35.*r(n_r)**3              &
+                  &               -7./slopeStrat**2*(rStrat**2+3.*rStrat*r(n_r)+6.*r(n_r)**2)*(rStrat-r(n_r))**3&
+                  &               +(rStrat**2+5.*rStrat*r(n_r)+15.*r(n_r)**2)*(rStrat-r(n_r))**5./slopeStrat**4 &
+                  &               -slopeStrat*(56.*rStrat**2-35.*rStrat*slopeStrat+22.*slopeStrat**2))          &
+                  &               /105./ r(n_r)**2
+               end if
+            end do
+         end if
+         l_non_adia = .false.!.true.!
+      else if ( nVarEntropyGrad == 7 ) then ! deep SSL, polynomial transition PW
+         if ( rStrat <= r_icb ) then
+            dentropy0(:) = -1.
+         else
+            do n_r=1,n_r_max
+               if ( r(n_r) <= rStrat-slopeStrat) then
+                  dentropy0(n_r)= ampStrat
+               else if ( r(n_r) >= rStrat) then
+                  dentropy0(n_r)= -1
+               else
+                  dentropy0(n_r)= (ampStrat+1) * ((r(n_r)-rStrat)/slopeStrat)**2                &
+                  &               * (2*((r(n_r)-rStrat)/slopeStrat) + 3) -1
+               end if
+            end do
+         end if
+         l_non_adia = .false.!.true.!
+      else if ( nVarEntropyGrad == 8 ) then ! deep SSL, polynomial transition PW
+         if ( rStrat <= r_icb ) then
+            dentropy0(:) = -1.
+         else
+            do n_r=1,n_r_max
+               if ( r(n_r) <= rStrat-slopeStrat .and. r(n_r) >= rStrat-thickStrat+slopeStrat) then
+                  dentropy0(n_r)= ampStrat
+               else if ( r(n_r) >= rStrat) then
+                  dentropy0(n_r)= -1
+               else if ( r(n_r) <= rStrat-thickStrat) then
+                  dentropy0(n_r)= -1
+               else if ( r(n_r) > rStrat-slopeStrat .and. r(n_r) < rStrat) then
+                  dentropy0(n_r)= (ampStrat+1) * ((r(n_r)-rStrat)/slopeStrat)**2                &
+                  &               * (2*((r(n_r)-rStrat)/slopeStrat) + 3) -1
+               else
+                  dentropy0(n_r)= (ampStrat+1) * ((rStrat-r(n_r)-thickStrat)/slopeStrat)**2  &
+                  &               * (2*((rStrat-r(n_r)-thickStrat)/slopeStrat) + 3) -1
+               end if
+            end do
+         end if
+         l_non_adia = .false.!.true.!
+!---------------------------------------------------------------PW
       end if
 
    end subroutine getEntropyGradient

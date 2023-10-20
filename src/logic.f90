@@ -23,6 +23,7 @@ module logic
    logical :: l_rot_ic       ! Switch off IC rotation
    logical :: l_rot_ma       ! Switch off OC rotation
    logical :: l_z10mat       ! Switch for solid body rotation
+   logical :: l_b10mat       ! Switch for holding m=0, l=1 mode at icb
    logical :: l_cond_ic      ! Switch for conducting IC
    logical :: l_cond_ma      ! Switch for conducting OC
    logical :: l_average      ! Switch for calculation of time-averages
