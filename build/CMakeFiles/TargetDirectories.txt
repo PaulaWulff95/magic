@@ -1,0 +1,6 @@
+/home/wulff/magic6/magic/build/CMakeFiles/edit_cache.dir
+/home/wulff/magic6/magic/build/CMakeFiles/rebuild_cache.dir
+/home/wulff/magic6/magic/build/src/CMakeFiles/edit_cache.dir
+/home/wulff/magic6/magic/build/src/CMakeFiles/rebuild_cache.dir
+/home/wulff/magic6/magic/build/src/CMakeFiles/lapack95.dir
+/home/wulff/magic6/magic/build/src/CMakeFiles/magic.exe.dir
